@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # Analysis Service
+  analysis-service:
+    build: ./services/analysis-service
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - digisafe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Auction Service
+  auction-service:
+    build: ./services/auction-service
+    ports:
+      - "8002:8002"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - digisafe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Payment Service
+  payment-service:
+    build: ./services/payment-service
+    ports:
+      - "8003:8003"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - digisafe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Verification Service
+  verification-service:
+    build: ./services/verification-service
+    ports:
+      - "8004:8004"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - digisafe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # User Service
+  user-service:
+    build: ./services/user-service
+    ports:
+      - "8005:8005"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PAYMENT_SERVICE_URL=http://payment-service:8003
+    networks:
+      - digisafe-network
+    depends_on:
+      - payment-service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Quality Service
+  quality-service:
+    build: ./services/quality-service
+    ports:
+      - "8006:8006"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - digisafe-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Next.js Frontend
+  frontend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - ANALYSIS_SERVICE_URL=http://analysis-service:8001
+      - AUCTION_SERVICE_URL=http://auction-service:8002
+      - PAYMENT_SERVICE_URL=http://payment-service:8003
+      - VERIFICATION_SERVICE_URL=http://verification-service:8004
+      - USER_SERVICE_URL=http://user-service:8005
+      - QUALITY_SERVICE_URL=http://quality-service:8006
+    networks:
+      - digisafe-network
+    depends_on:
+      - analysis-service
+      - auction-service
+      - payment-service
+      - verification-service
+      - user-service
+      - quality-service
+
+networks:
+  digisafe-network:
+    driver: bridge 

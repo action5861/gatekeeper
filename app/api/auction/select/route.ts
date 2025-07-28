@@ -1,7 +1,9 @@
-// 사용자의 입찰 선택 처리
+// 사용자의 입찰 선택 처리 (프록시)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { ApiResponse } from '@/lib/types';
+
+const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://localhost:8002';
 
 export async function POST(request: NextRequest) {
   try {
@@ -23,20 +25,25 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // (시뮬레이션) 처리 지연
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Auction Service에 요청 전달
+    const auctionResponse = await fetch(`${AUCTION_SERVICE_URL}/select`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ searchId, selectedBidId }),
+    });
 
-    // (시뮬레이션) 1차 보상 지급 성공
-    const rewardAmount = Math.floor(Math.random() * 5000) + 1000; // 1000~6000원 랜덤
+    if (!auctionResponse.ok) {
+      throw new Error('Auction service error');
+    }
+
+    const auctionData = await auctionResponse.json();
 
     return NextResponse.json<ApiResponse<{ rewardAmount: number; searchId: string; selectedBidId: string }>>({
       success: true,
-      data: {
-        rewardAmount,
-        searchId,
-        selectedBidId
-      },
-      message: '1차 보상이 지급되었습니다.'
+      data: auctionData.data,
+      message: auctionData.message
     }, { status: 200 });
 
   } catch (error) {

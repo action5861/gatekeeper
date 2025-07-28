@@ -1,0 +1,15 @@
+# AWS Configuration
+aws_region = "us-east-1"
+
+# VPC Configuration
+vpc_id = "vpc-12345678"
+
+# Subnet Configuration
+private_subnet_ids = [
+  "subnet-12345678",
+  "subnet-87654321"
+]
+
+# Environment Configuration
+environment = "production"
+project_name = "digisafe" 

@@ -1,8 +1,10 @@
-// 검색어 수신, 가치 평가 및 역경매 개시
+// 검색어 수신, 가치 평가 및 역경매 개시 (프록시)
 
 import { NextRequest, NextResponse } from 'next/server';
-import { evaluateDataValue, startReverseAuction } from '@/lib/simulation';
-import { Auction, QualityReport, ApiResponse } from '@/lib/types';
+import { ApiResponse } from '@/lib/types';
+
+const ANALYSIS_SERVICE_URL = process.env.ANALYSIS_SERVICE_URL || 'http://localhost:8001';
+const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://localhost:8002';
 
 export async function POST(request: NextRequest) {
   try {
@@ -25,28 +27,43 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // 1단계: 데이터 가치 평가
-    const qualityReport: QualityReport = evaluateDataValue(query);
+    // 1단계: Analysis Service에서 데이터 가치 평가
+    const analysisResponse = await fetch(`${ANALYSIS_SERVICE_URL}/evaluate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query: query.trim() }),
+    });
 
-    // 2단계: 역경매 시작
-    const bids = startReverseAuction(query, qualityReport.score);
+    if (!analysisResponse.ok) {
+      throw new Error('Analysis service error');
+    }
 
-    // 3단계: 경매 정보 생성
-    const searchId = `search_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000); // 30분 후 만료
+    const analysisData = await analysisResponse.json();
+    const qualityReport = analysisData.data;
 
-    const auction: Auction = {
-      searchId,
-      query: query.trim(),
-      bids,
-      status: 'active',
-      createdAt: now,
-      expiresAt
-    };
+    // 2단계: Auction Service에서 역경매 시작
+    const auctionResponse = await fetch(`${AUCTION_SERVICE_URL}/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ 
+        query: query.trim(), 
+        valueScore: qualityReport.score 
+      }),
+    });
+
+    if (!auctionResponse.ok) {
+      throw new Error('Auction service error');
+    }
+
+    const auctionData = await auctionResponse.json();
+    const auction = auctionData.data;
 
     // 성공 응답
-    return NextResponse.json<ApiResponse<{ auction: Auction; qualityReport: QualityReport }>>({
+    return NextResponse.json<ApiResponse<{ auction: any; qualityReport: any }>>({
       success: true,
       data: {
         auction,
