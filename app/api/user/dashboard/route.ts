@@ -1,14 +1,34 @@
 // 사용자 대시보드 데이터 (프록시)
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://localhost:8005';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const userResponse = await fetch(`${USER_SERVICE_URL}/dashboard`);
-    
+    const authHeader = request.headers.get('authorization')
+
+    if (!authHeader) {
+      return NextResponse.json(
+        { message: 'Authorization header required' },
+        { status: 401 }
+      )
+    }
+
+    const userResponse = await fetch(`${USER_SERVICE_URL}/dashboard`, {
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json',
+      },
+    });
+
     if (!userResponse.ok) {
+      if (userResponse.status === 401) {
+        return NextResponse.json(
+          { message: 'Unauthorized' },
+          { status: 401 }
+        )
+      }
       throw new Error('User service error');
     }
 
@@ -38,13 +58,15 @@ export async function GET() {
 }
 
 // 보상 누적을 위한 POST 메서드
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const authHeader = request.headers.get('authorization')
     const { amount } = await request.json();
-    
+
     const userResponse = await fetch(`${USER_SERVICE_URL}/earnings`, {
       method: 'POST',
       headers: {
+        'Authorization': authHeader || '',
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ amount }),

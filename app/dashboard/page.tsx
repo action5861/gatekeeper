@@ -2,13 +2,14 @@
 
 'use client'
 
-import { useState, useEffect } from 'react'
 import Header from '@/components/Header'
 import EarningsSummary from '@/components/dashboard/EarningsSummary'
 import QualityHistory from '@/components/dashboard/QualityHistory'
 import SubmissionLimitCard from '@/components/dashboard/SubmissionLimitCard'
 import { TransactionHistory } from '@/components/dashboard/TransactionHistory'
 import { Transaction } from '@/lib/types'
+import { useRouter } from 'next/navigation'
+import { useEffect, useState } from 'react'
 
 interface DashboardData {
   earnings: {
@@ -31,11 +32,29 @@ export default function Dashboard() {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const router = useRouter()
 
   const fetchDashboardData = async () => {
     try {
-      const response = await fetch('/api/user/dashboard')
+      const token = localStorage.getItem('token')
+      if (!token) {
+        router.push('/login')
+        return
+      }
+
+      const response = await fetch('/api/user/dashboard', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      })
+
       if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token')
+          localStorage.removeItem('userType')
+          router.push('/login')
+          return
+        }
         throw new Error('Failed to fetch dashboard data')
       }
       const data = await response.json()
@@ -95,7 +114,7 @@ export default function Dashboard() {
     <div className="min-h-screen bg-slate-900">
       {/* Header */}
       <Header />
-      
+
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Page Title */}
@@ -131,13 +150,13 @@ export default function Dashboard() {
             <p className="text-3xl font-bold text-blue-400">24</p>
             <p className="text-sm text-slate-400 mt-1">This month</p>
           </div>
-          
+
           <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp animation-delay-700">
             <h3 className="text-lg font-semibold text-slate-100 mb-2">Success Rate</h3>
             <p className="text-3xl font-bold text-green-400">87%</p>
             <p className="text-sm text-slate-400 mt-1">Auction completion</p>
           </div>
-          
+
           <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp animation-delay-800">
             <h3 className="text-lg font-semibold text-slate-100 mb-2">Avg Quality Score</h3>
             <p className="text-3xl font-bold text-yellow-400">72</p>

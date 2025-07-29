@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Analysis Service
   analysis-service:
@@ -11,7 +9,7 @@ services:
     networks:
       - digisafe-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -26,7 +24,7 @@ services:
     networks:
       - digisafe-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -41,7 +39,7 @@ services:
     networks:
       - digisafe-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -56,7 +54,7 @@ services:
     networks:
       - digisafe-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8004/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,7 +72,7 @@ services:
     depends_on:
       - payment-service
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8005/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -89,7 +87,7 @@ services:
     networks:
       - digisafe-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8006/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -118,4 +116,4 @@ services:
 
 networks:
   digisafe-network:
-    driver: bridge 
+    driver: bridge
