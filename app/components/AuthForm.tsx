@@ -27,11 +27,27 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
     const [showPassword, setShowPassword] = useState(false)
     const [error, setError] = useState('')
 
-    // Check for pre-selected user type from header
+    // Check for pre-selected user type from header or URL params
     useEffect(() => {
         if (typeof window !== 'undefined') {
+            // First check URL params
+            const urlParams = new URLSearchParams(window.location.search)
+            const typeFromUrl = urlParams.get('type')
+
+            if (typeFromUrl === 'user' || typeFromUrl === 'advertiser') {
+                console.log('AuthForm: Setting userType from URL param:', typeFromUrl)
+                setUserType(typeFromUrl)
+                // Clear the URL param
+                const newUrl = window.location.pathname
+                window.history.replaceState({}, '', newUrl)
+                return
+            }
+
+            // Fallback to localStorage
             const selectedUserType = localStorage.getItem('selectedUserType')
+            console.log('AuthForm: Checking for selectedUserType:', selectedUserType)
             if (selectedUserType === 'user' || selectedUserType === 'advertiser') {
+                console.log('AuthForm: Setting userType to:', selectedUserType)
                 setUserType(selectedUserType)
                 // Clear the stored selection after using it
                 localStorage.removeItem('selectedUserType')
@@ -43,17 +59,37 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
         e.preventDefault()
         setError('')
 
+        // Validate form data
+        if (!email.trim() || !password.trim()) {
+            setError('Please fill in all required fields')
+            return
+        }
+
+        if (mode === 'register') {
+            if (userType === 'user' && !username.trim()) {
+                setError('Username is required for user registration')
+                return
+            }
+            if (userType === 'advertiser' && !companyName.trim()) {
+                setError('Company name is required for advertiser registration')
+                return
+            }
+        }
+
         try {
             const formData: AuthFormData = {
                 userType,
-                email,
+                email: email.trim(),
                 password,
-                ...(mode === 'register' && { username }),
-                ...(mode === 'register' && userType === 'advertiser' && { companyName })
+                ...(mode === 'register' && userType === 'user' && { username: username.trim() }),
+                ...(mode === 'register' && userType === 'advertiser' && { companyName: companyName.trim() })
             }
+
+            console.log('Submitting form data:', { userType: formData.userType, email: formData.email, mode })
 
             await onSubmit(formData)
         } catch (err) {
+            console.error('Form submission error:', err)
             setError(err instanceof Error ? err.message : 'An error occurred')
         }
     }
@@ -81,22 +117,34 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
                 <div className="flex bg-slate-700/50 rounded-lg p-1 mb-6">
                     <button
                         type="button"
-                        onClick={() => setUserType('user')}
+                        onClick={() => {
+                            setUserType('user')
+                            setEmail('')
+                            setPassword('')
+                            setError('') // Clear any previous errors
+                        }}
+                        disabled={isLoading}
                         className={`flex-1 flex items-center justify-center space-x-2 py-2 px-4 rounded-md transition-all duration-200 ${userType === 'user'
-                                ? 'bg-blue-600 text-white shadow-lg'
-                                : 'text-slate-300 hover:text-white hover:bg-slate-600'
-                            }`}
+                            ? 'bg-blue-600 text-white shadow-lg'
+                            : 'text-slate-300 hover:text-white hover:bg-slate-600'
+                            } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                         <User className="w-4 h-4" />
                         <span className="font-medium">User</span>
                     </button>
                     <button
                         type="button"
-                        onClick={() => setUserType('advertiser')}
+                        onClick={() => {
+                            setUserType('advertiser')
+                            setEmail('')
+                            setPassword('')
+                            setError('') // Clear any previous errors
+                        }}
+                        disabled={isLoading}
                         className={`flex-1 flex items-center justify-center space-x-2 py-2 px-4 rounded-md transition-all duration-200 ${userType === 'advertiser'
-                                ? 'bg-green-600 text-white shadow-lg'
-                                : 'text-slate-300 hover:text-white hover:bg-slate-600'
-                            }`}
+                            ? 'bg-green-600 text-white shadow-lg'
+                            : 'text-slate-300 hover:text-white hover:bg-slate-600'
+                            } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                         <Building2 className="w-4 h-4" />
                         <span className="font-medium">Advertiser</span>
@@ -105,8 +153,8 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
 
                 {/* Form */}
                 <form onSubmit={handleSubmit} className="space-y-6">
-                    {/* Username field for registration */}
-                    {mode === 'register' && (
+                    {/* Username field for user registration only */}
+                    {mode === 'register' && userType === 'user' && (
                         <div>
                             <label htmlFor="username" className="block text-sm font-medium text-slate-300 mb-2">
                                 Username
@@ -147,21 +195,25 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
                         </div>
                     )}
 
-                    {/* Email field */}
+                    {/* Email/Username field */}
                     <div>
                         <label htmlFor="email" className="block text-sm font-medium text-slate-300 mb-2">
-                            Email
+                            {mode === 'login' && userType === 'advertiser' ? 'Username' : 'Email'}
                         </label>
                         <div className="relative">
-                            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-slate-400" />
+                            {mode === 'login' && userType === 'advertiser' ? (
+                                <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-slate-400" />
+                            ) : (
+                                <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-slate-400" />
+                            )}
                             <input
                                 id="email"
-                                type="email"
+                                type={mode === 'login' && userType === 'advertiser' ? 'text' : 'email'}
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
                                 required
                                 className="w-full pl-10 pr-4 py-3 bg-slate-700/50 border border-slate-600 rounded-lg text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                                placeholder="Enter your email"
+                                placeholder={mode === 'login' && userType === 'advertiser' ? 'Enter your username' : 'Enter your email'}
                             />
                         </div>
                     </div>
@@ -221,7 +273,7 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
                     <p className="text-slate-400">
                         {mode === 'login' ? "Don't have an account? " : "Already have an account? "}
                         <Link
-                            href={mode === 'login' ? '/register' : '/login'}
+                            href={mode === 'login' ? `/register?type=${userType}` : '/login'}
                             className="text-blue-400 hover:text-blue-300 font-medium transition-colors duration-200"
                         >
                             {mode === 'login' ? 'Sign up' : 'Sign in'}

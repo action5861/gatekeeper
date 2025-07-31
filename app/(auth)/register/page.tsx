@@ -27,21 +27,9 @@ export default function RegisterPage() {
 
             const result = await response.json()
 
-            // Store token in localStorage if login is automatic after registration
-            if (result.access_token) {
-                localStorage.setItem('token', result.access_token)
-                localStorage.setItem('userType', data.userType)
-
-                // Redirect based on user type
-                if (data.userType === 'advertiser') {
-                    router.push('/advertiser/dashboard')
-                } else {
-                    router.push('/dashboard')
-                }
-            } else {
-                // If no automatic login, redirect to login page
-                router.push('/login')
-            }
+            // 회원가입 성공 후 로그인 페이지로 리다이렉트
+            alert('회원가입이 완료되었습니다. 로그인해주세요.')
+            router.push('/login')
         } catch (error) {
             throw error
         } finally {

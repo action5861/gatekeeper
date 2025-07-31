@@ -1,100 +1,131 @@
+version: '3.8'
+
 services:
-  # Analysis Service
+  # 🗄️ PostgreSQL 데이터베이스 추가
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_DB: search_exchange_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: your_secure_password_123
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U admin -d search_exchange_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 📊 pgAdmin (데이터베이스 관리 도구)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 🔍 Analysis Service
   analysis-service:
     build: ./services/analysis-service
+    container_name: analysis-service
     ports:
       - "8001:8001"
-    environment:
-      - PYTHONUNBUFFERED=1
     networks:
-      - digisafe-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # Auction Service
+  # 🏪 Auction Service
   auction-service:
     build: ./services/auction-service
+    container_name: auction-service
     ports:
       - "8002:8002"
     environment:
-      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
     networks:
-      - digisafe-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # Payment Service
+  # 💰 Payment Service
   payment-service:
     build: ./services/payment-service
+    container_name: payment-service
     ports:
       - "8003:8003"
     environment:
-      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
     networks:
-      - digisafe-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8003/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # Verification Service
+  # ✅ Verification Service
   verification-service:
     build: ./services/verification-service
+    container_name: verification-service
     ports:
       - "8004:8004"
     environment:
-      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
     networks:
-      - digisafe-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8004/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # User Service
+  # 👤 User Service
   user-service:
     build: ./services/user-service
+    container_name: user-service
     ports:
       - "8005:8005"
     environment:
-      - PYTHONUNBUFFERED=1
-      - PAYMENT_SERVICE_URL=http://payment-service:8003
+      - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
     networks:
-      - digisafe-network
+      - app-network
     depends_on:
-      - payment-service
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8005/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      postgres:
+        condition: service_healthy
 
-  # Quality Service
-  quality-service:
-    build: ./services/quality-service
+  # 🏢 Advertiser Service
+  advertiser-service:
+    build: ./services/advertiser-service
+    container_name: advertiser-service
     ports:
-      - "8006:8006"
+      - "8007:8007"
     environment:
-      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
     networks:
-      - digisafe-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8006/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  # Next.js Frontend
+  # 🌐 Frontend
   frontend:
     build: .
+    container_name: frontend
     ports:
       - "3000:3000"
     environment:
@@ -103,17 +134,25 @@ services:
       - PAYMENT_SERVICE_URL=http://payment-service:8003
       - VERIFICATION_SERVICE_URL=http://verification-service:8004
       - USER_SERVICE_URL=http://user-service:8005
-      - QUALITY_SERVICE_URL=http://quality-service:8006
+      - ADVERTISER_SERVICE_URL=http://advertiser-service:8007
     networks:
-      - digisafe-network
+      - app-network
     depends_on:
       - analysis-service
       - auction-service
       - payment-service
       - verification-service
       - user-service
-      - quality-service
+      - advertiser-service
 
+# 📦 볼륨 정의 (데이터 영구 보존용)
+volumes:
+  postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# 🌐 네트워크 정의
 networks:
-  digisafe-network:
+  app-network:
     driver: bridge

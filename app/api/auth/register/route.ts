@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
 
         const requestBody = userType === 'advertiser'
             ? {
-                username: username || email, // Use provided username or fallback to email
+                username: email, // 사업자는 이메일을 username으로 사용
                 email: email,
                 password: password,
                 company_name: companyName,
@@ -39,7 +39,11 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        return NextResponse.json(data)
+        // Add userType to the response for frontend routing
+        return NextResponse.json({
+            ...data,
+            userType: userType
+        })
     } catch (error) {
         console.error('Registration API error:', error)
         return NextResponse.json(

@@ -59,7 +59,7 @@ export async function register(data: AuthData): Promise<RegisterResponse> {
 
         const requestBody = data.userType === 'advertiser'
             ? {
-                username: data.username,
+                username: data.email, // 사업자는 이메일을 username으로 사용
                 email: data.email,
                 password: data.password,
                 company_name: data.companyName,

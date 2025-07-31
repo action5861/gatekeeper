@@ -4,8 +4,28 @@ from pydantic import BaseModel
 from typing import Literal, Optional
 import random
 import asyncio
+from database import (
+    database,
+    VerificationRequest,
+    Transaction,
+    connect_to_database,
+    disconnect_from_database,
+)
 
 app = FastAPI(title="Verification Service", version="1.0.0")
+
+
+# 🚀 시작 이벤트
+@app.on_event("startup")
+async def startup():
+    await connect_to_database()
+
+
+# 🛑 종료 이벤트
+@app.on_event("shutdown")
+async def shutdown():
+    await disconnect_from_database()
+
 
 # CORS 설정
 app.add_middleware(
@@ -16,23 +36,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Pydantic 모델
 class VerifyRequest(BaseModel):
     searchId: str
     proof: str
+
 
 class VerifyResponse(BaseModel):
     success: bool
     data: Optional[dict] = None
     message: str
 
+
 class ClaimRequest(BaseModel):
     transactionId: str
     proofFile: str
 
+
 class ClaimResponse(BaseModel):
     status: str
     secondaryReward: Optional[int] = None
+
 
 # OCR 및 외부 API 연동을 통한 검증 과정을 시뮬레이션
 async def simulate_verification() -> dict:
@@ -41,8 +66,11 @@ async def simulate_verification() -> dict:
     is_success = random.random() > 0.3  # 70% 성공 확률
     return {
         "success": is_success,
-        "reward": random.randint(500, 1000) if is_success else 0  # 500-1000원 사이의 2차 보상
+        "reward": (
+            random.randint(500, 1000) if is_success else 0
+        ),  # 500-1000원 사이의 2차 보상
     }
+
 
 @app.post("/verify", response_model=VerifyResponse)
 async def verify_proof(request: VerifyRequest):
@@ -64,15 +92,15 @@ async def verify_proof(request: VerifyRequest):
         if is_verification_success:
             # 검증 성공: 2차 보상 지급
             secondary_reward_amount = random.randint(500, 3500)  # 500~3500원 랜덤
-            
+
             return VerifyResponse(
                 success=True,
                 data={
                     "searchId": request.searchId,
                     "secondaryRewardAmount": secondary_reward_amount,
-                    "verificationStatus": "success"
+                    "verificationStatus": "success",
                 },
-                message="검증 성공: 2차 보상이 지급되었습니다."
+                message="검증 성공: 2차 보상이 지급되었습니다.",
             )
 
         else:
@@ -82,13 +110,16 @@ async def verify_proof(request: VerifyRequest):
                 data={
                     "searchId": request.searchId,
                     "verificationStatus": "failed",
-                    "reason": "제출된 증빙 자료가 기준에 미달합니다."
+                    "reason": "제출된 증빙 자료가 기준에 미달합니다.",
                 },
-                message="검증 실패"
+                message="검증 실패",
             )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
+        )
+
 
 @app.post("/claim", response_model=ClaimResponse)
 async def claim_reward(transactionId: str = Form(...), proof: UploadFile = File(...)):
@@ -103,22 +134,28 @@ async def claim_reward(transactionId: str = Form(...), proof: UploadFile = File(
 
         if verification_result["success"]:
             return ClaimResponse(
-                status="2차 완료",
-                secondaryReward=verification_result["reward"]
+                status="2차 완료", secondaryReward=verification_result["reward"]
             )
         else:
-            return ClaimResponse(
-                status="검증 실패"
-            )
+            return ClaimResponse(status="검증 실패")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
+        )
+
 
 @app.get("/health")
 async def health_check():
     """서비스 상태 확인"""
-    return {"status": "healthy", "service": "verification-service"}
+    return {
+        "status": "healthy",
+        "service": "verification-service",
+        "database": "connected",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8004) 
+
+    uvicorn.run(app, host="0.0.0.0", port=8004)
