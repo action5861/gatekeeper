@@ -27,8 +27,13 @@ export default function RegisterPage() {
 
             const result = await response.json()
 
-            // 회원가입 성공 후 로그인 페이지로 리다이렉트
-            alert('회원가입이 완료되었습니다. 로그인해주세요.')
+            // 광고주인 경우 심사 상태 메시지 표시
+            if (data.userType === 'advertiser' && result.review_message) {
+                alert(`${result.message}\n\n${result.review_message}`)
+            } else {
+                alert('회원가입이 완료되었습니다. 로그인해주세요.')
+            }
+
             router.push('/login')
         } catch (error) {
             throw error

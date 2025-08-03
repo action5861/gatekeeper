@@ -2,13 +2,22 @@
 
 'use client'
 
-import { FileCheck2, AlertCircle, TrendingUp } from 'lucide-react'
+import { ErrorFallback } from '@/components/ui/ErrorFallback';
+import { SubmissionLimitSkeleton } from '@/components/ui/Skeleton';
+import { useSubmissionData } from '@/lib/hooks/useDashboardData';
+import { logComponentError } from '@/lib/utils/errorMonitor';
+import { AlertCircle, FileCheck2, Target, TrendingUp } from 'lucide-react';
 
-interface Props {
-  limitData: {
-    level: 'Excellent' | 'Good' | 'Average' | 'Needs Improvement';
-    dailyMax: number;
-  };
+interface SubmissionLimitData {
+  level: 'Excellent' | 'Good' | 'Average' | 'Needs Improvement';
+  dailyMax: number;
+}
+
+interface DailySubmissionData {
+  count: number;
+  limit: number;
+  remaining: number;
+  qualityScoreAvg: number;
 }
 
 const levelStyles = {
@@ -25,8 +34,48 @@ const levelDescriptions = {
   'Needs Improvement': 'Needs improvement - 30% daily limit',
 };
 
-export default function SubmissionLimitCard({ limitData }: Props) {
-  if (!limitData) return null;
+export default function SubmissionLimitCard() {
+  const { submissionLimit: limitData, dailySubmission, isLoading, error, refetch } = useSubmissionData();
+
+  // 에러 처리
+  if (error) {
+    logComponentError(
+      error instanceof Error ? error : new Error(error.toString()),
+      'SubmissionLimitCard',
+      undefined,
+      { limitData, dailySubmission }
+    );
+  }
+
+  // 로딩 상태
+  if (isLoading) {
+    return <SubmissionLimitSkeleton />;
+  }
+
+  // 에러 상태
+  if (error) {
+    return (
+      <ErrorFallback
+        error={error}
+        componentName="Submission Limit"
+        onRetry={refetch}
+      />
+    );
+  }
+
+  // 데이터가 없는 경우
+  if (!limitData) {
+    return (
+      <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
+        <div className="flex items-center justify-center h-64">
+          <div className="flex flex-col items-center space-y-4">
+            <FileCheck2 className="w-8 h-8 text-slate-400" />
+            <p className="text-slate-400">제출 한도 데이터가 없습니다</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   const getLevelIcon = (level: string) => {
     switch (level) {
@@ -41,6 +90,37 @@ export default function SubmissionLimitCard({ limitData }: Props) {
       default:
         return <FileCheck2 className="w-5 h-5" />;
     }
+  };
+
+  // 사용률 계산
+  const usagePercentage = dailySubmission ? (dailySubmission.count / dailySubmission.limit) * 100 : 0;
+  const isNearLimit = usagePercentage >= 80;
+  const isAtLimit = usagePercentage >= 100;
+
+  // 개인화된 팁 생성
+  const getPersonalizedTips = () => {
+    const tips = [];
+
+    if (dailySubmission) {
+      if (dailySubmission.qualityScoreAvg < 70) {
+        tips.push("품질 점수를 70점 이상으로 높이면 한도가 증가합니다");
+      }
+      if (dailySubmission.count < 5) {
+        tips.push("더 많은 검색어를 제출하여 경험을 쌓아보세요");
+      }
+      if (isNearLimit) {
+        tips.push("오늘 한도에 거의 도달했습니다. 내일 다시 시도해보세요");
+      }
+    }
+
+    // 기본 팁
+    if (tips.length === 0) {
+      tips.push("상업적 키워드를 포함한 검색어를 작성하세요");
+      tips.push("일관된 검색 품질을 유지하세요");
+      tips.push("검증 과정을 신속하게 완료하세요");
+    }
+
+    return tips;
   };
 
   return (
@@ -73,35 +153,64 @@ export default function SubmissionLimitCard({ limitData }: Props) {
       </div>
 
       {/* Progress Bar */}
-      <div className="mb-6">
-        <div className="flex justify-between items-center mb-2">
-          <span className="text-sm text-slate-300">Today's Usage</span>
-          <span className="text-sm text-slate-400">8 / {limitData.dailyMax}</span>
+      {dailySubmission && (
+        <div className="mb-6">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm text-slate-300">Today's Usage</span>
+            <span className={`text-sm ${isAtLimit ? 'text-red-400' : isNearLimit ? 'text-yellow-400' : 'text-slate-400'}`}>
+              {dailySubmission.count} / {dailySubmission.limit}
+            </span>
+          </div>
+          <div className="w-full bg-slate-700 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all duration-300 ${isAtLimit
+                ? 'bg-red-500'
+                : isNearLimit
+                  ? 'bg-yellow-500'
+                  : 'bg-gradient-to-r from-purple-500 to-blue-500'
+                }`}
+              style={{ width: `${Math.min(usagePercentage, 100)}%` }}
+            ></div>
+          </div>
+          {dailySubmission.remaining > 0 && (
+            <p className="text-xs text-slate-400 mt-1">
+              {dailySubmission.remaining} submissions remaining today
+            </p>
+          )}
         </div>
-        <div className="w-full bg-slate-700 rounded-full h-2">
-          <div 
-            className="bg-gradient-to-r from-purple-500 to-blue-500 h-2 rounded-full transition-all duration-300"
-            style={{ width: `${Math.min((8 / limitData.dailyMax) * 100, 100)}%` }}
-          ></div>
-        </div>
-      </div>
+      )}
 
-      {/* Tips */}
+      {/* Quality Score Display */}
+      {dailySubmission && (
+        <div className="mb-6 bg-slate-700/30 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Target className="w-4 h-4 text-yellow-400" />
+              <span className="text-sm text-slate-300">Today's Avg Quality</span>
+            </div>
+            <span className={`font-semibold ${dailySubmission.qualityScoreAvg >= 90 ? 'text-blue-400' :
+              dailySubmission.qualityScoreAvg >= 70 ? 'text-green-400' :
+                dailySubmission.qualityScoreAvg >= 50 ? 'text-yellow-400' : 'text-red-400'
+              }`}>
+              {dailySubmission.qualityScoreAvg}점
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Personalized Tips */}
       <div className="bg-slate-700/30 rounded-lg p-4">
-        <h4 className="text-lg font-semibold text-slate-100 mb-3">Tips to Increase Limit</h4>
+        <h4 className="text-lg font-semibold text-slate-100 mb-3 flex items-center space-x-2">
+          <TrendingUp className="w-5 h-5 text-blue-400" />
+          <span>Personalized Tips</span>
+        </h4>
         <ul className="space-y-2 text-sm text-slate-300">
-          <li className="flex items-start space-x-2">
-            <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-2 flex-shrink-0"></div>
-            <span>Include commercial keywords in your searches</span>
-          </li>
-          <li className="flex items-start space-x-2">
-            <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-2 flex-shrink-0"></div>
-            <span>Maintain consistent search quality</span>
-          </li>
-          <li className="flex items-start space-x-2">
-            <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-2 flex-shrink-0"></div>
-            <span>Complete verification processes promptly</span>
-          </li>
+          {getPersonalizedTips().map((tip, index) => (
+            <li key={index} className="flex items-start space-x-2">
+              <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-2 flex-shrink-0"></div>
+              <span>{tip}</span>
+            </li>
+          ))}
         </ul>
       </div>
     </div>

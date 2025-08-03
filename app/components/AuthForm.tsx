@@ -3,6 +3,7 @@
 import { Building2, Eye, EyeOff, Lock, Mail, User } from 'lucide-react'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
+import BusinessSetup, { BusinessSetupData } from './advertiser/BusinessSetup'
 
 interface AuthFormProps {
     mode: 'login' | 'register'
@@ -16,6 +17,7 @@ export interface AuthFormData {
     password: string
     username?: string
     companyName?: string
+    businessSetup?: BusinessSetupData
 }
 
 export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthFormProps) {
@@ -26,6 +28,8 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
     const [companyName, setCompanyName] = useState('')
     const [showPassword, setShowPassword] = useState(false)
     const [error, setError] = useState('')
+    const [showBusinessSetup, setShowBusinessSetup] = useState(false)
+    const [businessSetupData, setBusinessSetupData] = useState<BusinessSetupData | null>(null)
 
     // Check for pre-selected user type from header or URL params
     useEffect(() => {
@@ -76,6 +80,12 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
             }
         }
 
+        // For advertiser registration, show business setup first
+        if (mode === 'register' && userType === 'advertiser') {
+            setShowBusinessSetup(true)
+            return
+        }
+
         try {
             const formData: AuthFormData = {
                 userType,
@@ -92,6 +102,44 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
             console.error('Form submission error:', err)
             setError(err instanceof Error ? err.message : 'An error occurred')
         }
+    }
+
+    const handleBusinessSetupComplete = async (data: BusinessSetupData) => {
+        setBusinessSetupData(data)
+        setShowBusinessSetup(false)
+
+        try {
+            const formData: AuthFormData = {
+                userType,
+                email: email.trim(),
+                password,
+                companyName: companyName.trim(),
+                businessSetup: data
+            }
+
+            console.log('Submitting advertiser form data with business setup:', formData)
+
+            await onSubmit(formData)
+        } catch (err) {
+            console.error('Form submission error:', err)
+            setError(err instanceof Error ? err.message : 'An error occurred')
+        }
+    }
+
+    const handleBusinessSetupBack = () => {
+        setShowBusinessSetup(false)
+        setBusinessSetupData(null)
+    }
+
+    // Show business setup if needed
+    if (showBusinessSetup) {
+        return (
+            <BusinessSetup
+                onComplete={handleBusinessSetupComplete}
+                onBack={handleBusinessSetupBack}
+                isLoading={isLoading}
+            />
+        )
     }
 
     return (

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json()
-        const { userType, email, password, username, companyName } = body
+        const { userType, email, password, username, companyName, businessSetup } = body
 
         const serviceUrl = userType === 'advertiser'
             ? process.env.ADVERTISER_SERVICE_URL || 'http://advertiser-service:8007'
@@ -15,6 +15,7 @@ export async function POST(request: NextRequest) {
                 email: email,
                 password: password,
                 company_name: companyName,
+                business_setup: businessSetup, // 비즈니스 설정 데이터 추가
             }
             : {
                 username: username || email, // Use provided username or fallback to email

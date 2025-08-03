@@ -49,6 +49,20 @@ export async function GET(request: NextRequest) {
         total: 0,
         primary: 0,
         secondary: 0,
+        thisMonth: {
+          total: 0,
+          primary: 0,
+          secondary: 0,
+        },
+        lastMonth: {
+          total: 0,
+          primary: 0,
+          secondary: 0,
+        },
+        growth: {
+          percentage: "N/A",
+          isPositive: true
+        }
       },
       qualityHistory: [
         { name: 'Week 1', score: 65 },
@@ -56,9 +70,30 @@ export async function GET(request: NextRequest) {
         { name: 'Week 3', score: 72 },
         { name: 'Week 4', score: 75 },
       ],
+      qualityStats: {
+        average: 70.5,
+        max: 75,
+        min: 65,
+        growth: {
+          percentage: "+4.2%",
+          isPositive: true
+        },
+        recentScore: 75
+      },
       submissionLimit: {
         level: 'Good',
         dailyMax: 20
+      },
+      dailySubmission: {
+        count: 8,
+        limit: 20,
+        remaining: 12,
+        qualityScoreAvg: 75
+      },
+      stats: {
+        monthlySearches: 24,
+        successRate: 87.5,
+        avgQualityScore: 72.3
       },
       transactions: [],
     });
