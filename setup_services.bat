@@ -17,7 +17,7 @@ echo Python found. Starting setup...
 echo.
 
 REM List of services to setup
-set SERVICES=analysis-service auction-service payment-service quality-service user-service verification-service
+set SERVICES=advertiser-service analysis-service auction-service payment-service quality-service user-service verification-service
 
 REM Loop through each service
 for %%s in (%SERVICES%) do (

@@ -227,6 +227,26 @@ async def evaluate_query(request: EvaluateRequest):
         # 데이터 가치 평가
         quality_report = evaluate_data_value(request.query.strip())
 
+        # 검색어 데이터를 DB에 저장
+        query = """
+            INSERT INTO search_queries (user_id, query_text, quality_score, commercial_value, keywords, suggestions)
+            VALUES (:user_id, :query_text, :quality_score, :commercial_value, :keywords, :suggestions)
+        """
+
+        import json
+
+        await database.execute(
+            query,
+            {
+                "user_id": 1,  # 하드코딩된 user_id
+                "query_text": request.query.strip(),
+                "quality_score": quality_report.score,
+                "commercial_value": quality_report.commercialValue,
+                "keywords": json.dumps(quality_report.keywords),
+                "suggestions": json.dumps(quality_report.suggestions),
+            },
+        )
+
         return EvaluateResponse(
             success=True,
             data=quality_report,

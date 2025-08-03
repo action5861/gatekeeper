@@ -2,7 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://localhost:8005';
+const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://user-service:8005';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,12 +15,16 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    console.log('Forwarding dashboard request with auth:', authHeader)
+
     const userResponse = await fetch(`${USER_SERVICE_URL}/dashboard`, {
       headers: {
-        'Authorization': authHeader,
+        'Authorization': authHeader,  // 🔥 JWT 토큰 전달
         'Content-Type': 'application/json',
       },
     });
+
+    console.log('User service response status:', userResponse.status)
 
     if (!userResponse.ok) {
       if (userResponse.status === 401) {
@@ -33,14 +37,18 @@ export async function GET(request: NextRequest) {
     }
 
     const userData = await userResponse.json();
+    console.log('Dashboard data retrieved:', userData)
+
     return NextResponse.json(userData);
   } catch (error) {
     console.error('Failed to fetch dashboard data:', error);
+
+    // 🚨 임시: 에러 시 기본 데이터 반환 (개발용)
     return NextResponse.json({
       earnings: {
-        total: 1500,
-        primary: 1200,
-        secondary: 300,
+        total: 0,
+        primary: 0,
+        secondary: 0,
       },
       qualityHistory: [
         { name: 'Week 1', score: 65 },
@@ -57,31 +65,4 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// 보상 누적을 위한 POST 메서드
-export async function POST(request: NextRequest) {
-  try {
-    const authHeader = request.headers.get('authorization')
-    const { amount } = await request.json();
-
-    const userResponse = await fetch(`${USER_SERVICE_URL}/earnings`, {
-      method: 'POST',
-      headers: {
-        'Authorization': authHeader || '',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ amount }),
-    });
-
-    if (!userResponse.ok) {
-      throw new Error('User service error');
-    }
-
-    const userData = await userResponse.json();
-    return NextResponse.json(userData);
-  } catch (error) {
-    return NextResponse.json({
-      success: false,
-      message: '보상 누적 중 오류가 발생했습니다.'
-    }, { status: 500 });
-  }
-} 
+// POST 메서드는 제거 (User Service에서 직접 처리) 

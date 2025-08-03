@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
             )
         }
 
-        const serviceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
+        const serviceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://advertiser-service:8007'
 
         const response = await fetch(`${serviceUrl}/dashboard`, {
             method: 'GET',

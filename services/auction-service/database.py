@@ -15,23 +15,23 @@ from sqlalchemy.sql import func
 from databases import Database
 import asyncpg
 
-# ?�이?�베?�스 URL
+# 데이터베이스 URL
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db",
 )
 
-# SQLAlchemy ?�정
+# SQLAlchemy 설정
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Databases (비동�? ?�정
+# Databases (비동기 설정)
 database = Database(DATABASE_URL)
 
 Base = declarative_base()
 
 
-# ?�� 검??쿼리 모델
+# 검색 쿼리 모델
 class SearchQuery(Base):
     __tablename__ = "search_queries"
 
@@ -42,10 +42,12 @@ class SearchQuery(Base):
     commercial_value = Column(String(20), nullable=False)
     keywords = Column(JSON, nullable=True)
     suggestions = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp())
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.current_timestamp()
+    )
 
 
-# ?�� 경매 모델
+# 경매 모델
 class Auction(Base):
     __tablename__ = "auctions"
 
@@ -54,12 +56,14 @@ class Auction(Base):
     query_text = Column(String(500), nullable=False)
     user_id = Column(Integer, nullable=True)
     status = Column(String(20), default="active")
-    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp())
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.current_timestamp()
+    )
     expires_at = Column(DateTime(timezone=True), nullable=False)
     selected_bid_id = Column(String(100), nullable=True)
 
 
-# ?�� ?�찰 모델
+# 입찰 모델
 class Bid(Base):
     __tablename__ = "bids"
 
@@ -69,10 +73,12 @@ class Bid(Base):
     price = Column(Integer, nullable=False)
     bonus_description = Column(Text, nullable=True)
     landing_url = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.current_timestamp())
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.current_timestamp()
+    )
 
 
-# ?�이?�베?�스 ?�결 ?�수
+# 데이터베이스 연결 함수
 async def connect_to_database():
     await database.connect()
     print("✅ Auction Service database connected successfully!")

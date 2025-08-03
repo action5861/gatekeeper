@@ -2,9 +2,9 @@
 
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Bid, Auction } from '@/lib/types'
-import { Clock, Users, DollarSign, TrendingUp, Award, Gift } from 'lucide-react'
+import { Auction, Bid } from '@/lib/types'
+import { Award, Clock, DollarSign, TrendingUp, Users } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import RewardModal from '../ui/RewardModal'
 
 interface AuctionStatusProps {
@@ -47,7 +47,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
   const handleBidSelect = async (bidId: string) => {
     if (!auction || !onBidSelect) return
-    
+
     setIsLoading(true)
     try {
       const response = await fetch('/api/auction/select', {
@@ -62,7 +62,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
       })
 
       const data = await response.json()
-      
+
       if (data.success) {
         onBidSelect(bidId)
         alert(`1차 보상이 지급되었습니다! (${data.data.rewardAmount.toLocaleString()}원)`)
@@ -79,12 +79,14 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
   const handleVisitWithReward = async (bid: Bid) => {
     setRewardLoading(bid.id)
-    
+
     try {
+      const token = localStorage.getItem('token')
       const response = await fetch('/api/reward', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(token && { 'Authorization': `Bearer ${token}` }),
         },
         body: JSON.stringify({
           bidId: bid.id,
@@ -95,17 +97,17 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
       })
 
       const result = await response.json()
-      
+
       if (result.success) {
         // 성공 시 모달 표시
         setRewardAmount(bid.price)
         setShowRewardModal(true)
-        
+
         // 대시보드 업데이트 이벤트 발생
-        window.dispatchEvent(new CustomEvent('reward-updated', { 
-          detail: { amount: bid.price } 
+        window.dispatchEvent(new CustomEvent('reward-updated', {
+          detail: { amount: bid.price }
         }))
-        
+
         // 새 탭에서 사이트 열기
         window.open(bid.landingUrl, '_blank', 'noopener,noreferrer')
       } else {
@@ -151,7 +153,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
           </div>
           <div className="text-2xl font-bold text-red-400">{timeLeft}</div>
         </div>
-        
+
         <div className="bg-slate-700/30 rounded-lg p-4">
           <div className="flex items-center space-x-2 mb-2">
             <Users className="w-5 h-5 text-green-400" />
@@ -159,7 +161,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
           </div>
           <div className="text-2xl font-bold text-green-400">{auction.bids.length}</div>
         </div>
-        
+
         <div className="bg-slate-700/30 rounded-lg p-4">
           <div className="flex items-center space-x-2 mb-2">
             <DollarSign className="w-5 h-5 text-yellow-400" />
@@ -173,11 +175,10 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
       {/* Reward Message */}
       {rewardMessage && (
-        <div className={`mb-4 p-4 rounded-lg ${
-          rewardMessage.includes('🎉') 
-            ? 'bg-green-500/20 border border-green-500/50 text-green-300' 
+        <div className={`mb-4 p-4 rounded-lg ${rewardMessage.includes('🎉')
+            ? 'bg-green-500/20 border border-green-500/50 text-green-300'
             : 'bg-red-500/20 border border-red-500/50 text-red-300'
-        }`}>
+          }`}>
           {rewardMessage}
         </div>
       )}
@@ -185,7 +186,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
       {/* Bids List */}
       <div className="space-y-3">
         <h4 className="text-lg font-semibold text-slate-100 mb-4">Current Bids</h4>
-        
+
         {/* Reward Modal */}
         <RewardModal
           isOpen={showRewardModal}
@@ -193,7 +194,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
           amount={rewardAmount}
           message={`1차로 ${rewardAmount}원 즉시보상이 지급되었습니다!`}
         />
-        
+
         {auction.bids.length === 0 ? (
           <div className="text-center py-8">
             <Award className="w-12 h-12 text-slate-400 mx-auto mb-4" />
@@ -203,20 +204,18 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
           auction.bids.map((bid, index) => (
             <div
               key={bid.id}
-              className={`bg-slate-700/30 rounded-lg p-4 border transition-all duration-200 ${
-                index === 0 
-                  ? 'border-yellow-500/50 bg-yellow-500/10' 
+              className={`bg-slate-700/30 rounded-lg p-4 border transition-all duration-200 ${index === 0
+                  ? 'border-yellow-500/50 bg-yellow-500/10'
                   : 'border-slate-600 hover:border-slate-500'
-              }`}
+                }`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <div className="flex items-center space-x-3 mb-2">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                      index === 0 
-                        ? 'bg-yellow-500 text-yellow-900' 
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${index === 0
+                        ? 'bg-yellow-500 text-yellow-900'
                         : 'bg-slate-600 text-slate-300'
-                    }`}>
+                      }`}>
                       #{index + 1}
                     </div>
                     <div>
@@ -225,7 +224,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                     </div>
                   </div>
                 </div>
-                
+
                 <div className="text-right mr-6">
                   <div className="text-2xl font-bold text-slate-100">
                     {bid.price.toLocaleString()}원
@@ -234,7 +233,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                     {new Date(bid.timestamp).toLocaleTimeString()}
                   </div>
                 </div>
-                
+
                 <button
                   onClick={() => handleVisitWithReward(bid)}
                   disabled={rewardLoading === bid.id}

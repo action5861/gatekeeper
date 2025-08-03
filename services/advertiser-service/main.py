@@ -13,8 +13,6 @@ from dotenv import load_dotenv
 # 데이터베이스 연동 추가
 from database import (
     database,
-    Advertiser,
-    Bid,
     connect_to_database,
     disconnect_from_database,
 )
@@ -143,7 +141,7 @@ async def get_current_advertiser(
         payload = jwt.decode(
             credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM]
         )
-        username: str = payload.get("sub")
+        username = payload.get("sub")
         if username is None:
             raise credentials_exception
     except JWTError:

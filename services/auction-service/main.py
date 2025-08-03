@@ -5,14 +5,37 @@ from typing import List, Literal
 from datetime import datetime, timedelta
 import random
 import asyncio
-from database import (
-    database,
-    SearchQuery,
-    Auction,
-    Bid,
-    connect_to_database,
-    disconnect_from_database,
-)
+
+# Database import
+try:
+    from database import (
+        database,
+        SearchQuery,
+        connect_to_database,
+        disconnect_from_database,
+    )
+
+    print("✅ Database models imported successfully")
+except ImportError as e:
+    print(f"❌ Database import failed: {e}")
+    # Fallback: 기본 database 연결만 유지
+    from databases import Database
+    import os
+
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL",
+        "postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db",
+    )
+    database = Database(DATABASE_URL)
+
+    async def connect_to_database():
+        await database.connect()
+        print("✅ Auction Service database connected successfully!")
+
+    async def disconnect_from_database():
+        await database.disconnect()
+        print("Auction Service database disconnected")
+
 
 app = FastAPI(title="Auction Service", version="1.0.0")
 
@@ -39,8 +62,8 @@ app.add_middleware(
 )
 
 
-# Pydantic 모델
-class Bid(BaseModel):
+# ✅ Pydantic 모델들 (API 응답용)
+class BidResponse(BaseModel):
     id: str
     buyerName: str
     price: int
@@ -49,10 +72,10 @@ class Bid(BaseModel):
     landingUrl: str
 
 
-class Auction(BaseModel):
+class AuctionResponse(BaseModel):
     searchId: str
     query: str
-    bids: List[Bid]
+    bids: List[BidResponse]
     status: Literal["active", "completed", "cancelled"]
     createdAt: datetime
     expiresAt: datetime
@@ -65,7 +88,7 @@ class StartAuctionRequest(BaseModel):
 
 class StartAuctionResponse(BaseModel):
     success: bool
-    data: Auction
+    data: AuctionResponse
     message: str
 
 
@@ -111,8 +134,7 @@ DATA_BUYERS = [
     },
 ]
 
-# 메모리 내 경매 저장소 (실제로는 데이터베이스 사용)
-# 이제 PostgreSQL에서 데이터를 가져옵니다
+# 메모리 내 경매 저장소 제거 - 이제 데이터베이스 사용
 
 
 def generate_bonus_conditions(buyer: dict, value_score: int) -> str:
@@ -139,14 +161,14 @@ def generate_bonus_conditions(buyer: dict, value_score: int) -> str:
     return ", ".join(conditions) if conditions else "기본 서비스"
 
 
-def start_reverse_auction(query: str, value_score: int) -> List[Bid]:
+def start_reverse_auction(query: str, value_score: int) -> List[BidResponse]:
     """가치 점수에 비례하여 가상 입찰 목록을 생성"""
     now = datetime.now()
 
     # '아이폰16' 특별 케이스 처리
     if "아이폰16" in query.lower() or "iphone16" in query.lower():
         return [
-            Bid(
+            BidResponse(
                 id="bid-google",
                 buyerName="Google",
                 price=random.randint(100, 1000),
@@ -154,7 +176,7 @@ def start_reverse_auction(query: str, value_score: int) -> List[Bid]:
                 timestamp=now,
                 landingUrl=f"https://www.google.com/search?q={query}",
             ),
-            Bid(
+            BidResponse(
                 id="bid-naver",
                 buyerName="네이버",
                 price=random.randint(100, 1000),
@@ -162,7 +184,7 @@ def start_reverse_auction(query: str, value_score: int) -> List[Bid]:
                 timestamp=now,
                 landingUrl=f"https://search.naver.com/search.naver?query={query}",
             ),
-            Bid(
+            BidResponse(
                 id="bid-coupang",
                 buyerName="쿠팡",
                 price=random.randint(100, 1000),
@@ -170,7 +192,7 @@ def start_reverse_auction(query: str, value_score: int) -> List[Bid]:
                 timestamp=now,
                 landingUrl=f"https://www.coupang.com/np/search?q={query}",
             ),
-            Bid(
+            BidResponse(
                 id="bid-amazon",
                 buyerName="Amazon",
                 price=random.randint(100, 1000),
@@ -224,10 +246,12 @@ def start_reverse_auction(query: str, value_score: int) -> List[Bid]:
         price = random.randint(100, 1000)
         platform_buyer = platform_buyers[i % len(platform_buyers)]
 
-        bid_id = f"bid_{buyer['id']}_{int(now.timestamp())}_{i}"
+        import uuid
+
+        bid_id = f"bid_{buyer['id']}_{int(now.timestamp())}_{i}_{uuid.uuid4().hex[:8]}"
 
         bids.append(
-            Bid(
+            BidResponse(
                 id=bid_id,
                 buyerName=platform_buyer["name"],
                 price=price,
@@ -267,7 +291,55 @@ async def start_auction(request: StartAuctionRequest):
         now = datetime.now()
         expires_at = now + timedelta(minutes=30)  # 30분 후 만료
 
-        auction = Auction(
+        # 경매 정보를 DB에 저장
+        auction_query = """
+            INSERT INTO auctions (search_id, query_text, user_id, status, expires_at)
+            VALUES (:search_id, :query_text, :user_id, :status, :expires_at)
+            RETURNING id
+        """
+
+        try:
+            auction_result = await database.fetch_one(
+                auction_query,
+                {
+                    "search_id": search_id,
+                    "query_text": request.query.strip(),
+                    "user_id": 1,  # 하드코딩된 user_id
+                    "status": "active",
+                    "expires_at": expires_at,
+                },
+            )
+        except Exception as db_error:
+            print(f"❌ Database error in auction creation: {str(db_error)}")
+            raise HTTPException(
+                status_code=500, detail=f"데이터베이스 오류: {str(db_error)}"
+            )
+
+        if not auction_result:
+            raise HTTPException(status_code=500, detail="경매 생성에 실패했습니다.")
+
+        auction_id = auction_result["id"]
+
+        # 입찰 정보를 DB에 저장
+        for bid in bids:
+            bid_query = """
+                INSERT INTO bids (id, auction_id, buyer_name, price, bonus_description, landing_url)
+                VALUES (:id, :auction_id, :buyer_name, :price, :bonus_description, :landing_url)
+            """
+
+            await database.execute(
+                bid_query,
+                {
+                    "id": bid.id,
+                    "auction_id": auction_id,
+                    "buyer_name": bid.buyerName,
+                    "price": bid.price,
+                    "bonus_description": bid.bonus,
+                    "landing_url": bid.landingUrl,
+                },
+            )
+
+        auction = AuctionResponse(
             searchId=search_id,
             query=request.query.strip(),
             bids=bids,
@@ -276,14 +348,12 @@ async def start_auction(request: StartAuctionRequest):
             expiresAt=expires_at,
         )
 
-        # 경매 저장
-        auctions[search_id] = auction
-
         return StartAuctionResponse(
             success=True, data=auction, message="역경매가 성공적으로 시작되었습니다."
         )
 
     except Exception as e:
+        print(f"❌ Auction service error: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
         )
@@ -297,9 +367,28 @@ async def select_bid(request: SelectBidRequest):
         if not request.searchId or not request.selectedBidId:
             raise HTTPException(status_code=400, detail="유효하지 않은 요청입니다.")
 
-        # 경매 존재 확인
-        if request.searchId not in auctions:
+        # 경매 존재 확인 (DB에서 조회)
+        auction_query = "SELECT * FROM auctions WHERE search_id = :search_id"
+        auction = await database.fetch_one(
+            auction_query, {"search_id": request.searchId}
+        )
+
+        if not auction:
             raise HTTPException(status_code=404, detail="경매를 찾을 수 없습니다.")
+
+        # 선택된 입찰 정보 업데이트
+        update_query = """
+            UPDATE auctions 
+            SET selected_bid_id = :selected_bid_id, status = 'completed'
+            WHERE search_id = :search_id
+        """
+        await database.execute(
+            update_query,
+            {
+                "selected_bid_id": request.selectedBidId,
+                "search_id": request.searchId,
+            },
+        )
 
         # (시뮬레이션) 처리 지연
         await simulate_real_time_delay()
@@ -327,17 +416,51 @@ async def select_bid(request: SelectBidRequest):
 async def get_auction_status(search_id: str):
     """경매 상태를 조회합니다."""
     try:
-        if search_id not in auctions:
+        # DB에서 경매 정보 조회
+        auction_query = "SELECT * FROM auctions WHERE search_id = :search_id"
+        auction = await database.fetch_one(auction_query, {"search_id": search_id})
+
+        if not auction:
             raise HTTPException(status_code=404, detail="경매를 찾을 수 없습니다.")
 
-        auction = auctions[search_id]
+        # 입찰 정보 조회
+        bids_query = "SELECT * FROM bids WHERE auction_id = :auction_id"
+        bids = await database.fetch_all(bids_query, {"auction_id": auction["id"]})
+
         status_update = await simulate_auction_update(search_id)
 
         return AuctionStatusResponse(
             success=True,
-            data={"auction": auction, "status": status_update},
+            data={"auction": auction, "bids": bids, "status": status_update},
             message="경매 상태 조회가 완료되었습니다.",
         )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@app.get("/bids")
+async def get_recent_bids():
+    """최근 입찰 내역을 반환합니다."""
+    try:
+        # 시뮬레이션 데이터 반환
+        recent_bids = []
+        for i in range(5):
+            recent_bids.append(
+                {
+                    "id": f"bid_{random.randint(1000, 9999)}",
+                    "auctionId": f"auction_{random.randint(100, 999)}",
+                    "amount": random.randint(1000, 5000),
+                    "timestamp": datetime.now().isoformat(),
+                    "status": random.choice(["active", "won", "lost", "pending"]),
+                    "highestBid": random.randint(1000, 5000),
+                    "myBid": random.randint(1000, 5000),
+                }
+            )
+
+        return {"success": True, "bids": recent_bids}
 
     except Exception as e:
         raise HTTPException(

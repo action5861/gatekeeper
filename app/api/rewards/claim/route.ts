@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-const VERIFICATION_SERVICE_URL = process.env.VERIFICATION_SERVICE_URL || 'http://localhost:8004';
+const VERIFICATION_SERVICE_URL = process.env.VERIFICATION_SERVICE_URL || 'http://verification-service:8004';
 
 export async function POST(request: Request) {
   try {

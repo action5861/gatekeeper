@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Literal, Optional
 from datetime import datetime
 import random
+from jose import JWTError, jwt
 from database import (
     database,
-    Transaction,
     connect_to_database,
     disconnect_from_database,
 )
@@ -68,18 +69,48 @@ class TransactionsResponse(BaseModel):
     transactions: List[Transaction]
 
 
+# JWT 설정
+SECRET_KEY = "a_very_secret_key_for_jwt"
+ALGORITHM = "HS256"
+security = HTTPBearer()
+
+
+# JWT 디코딩 함수
+async def get_user_id_from_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """JWT 토큰에서 사용자 ID 추출"""
+    try:
+        payload = jwt.decode(
+            credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM]
+        )
+        email = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # 이메일로 사용자 ID 조회
+        user = await database.fetch_one(
+            "SELECT id FROM users WHERE email = :email", {"email": email}
+        )
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        return user["id"]
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
 # 메모리 내 거래 내역 저장소 (실제로는 데이터베이스 사용)
 # 이제 PostgreSQL에서 데이터를 가져옵니다
 
 
 @app.post("/reward", response_model=RewardResponse)
-async def process_reward(request: RewardRequest):
-    """보상을 지급하고 거래 내역을 생성합니다."""
+async def process_reward(
+    request: RewardRequest, user_id: int = Depends(get_user_id_from_token)
+):
+    """🔥 JWT에서 실제 사용자 ID 추출하여 거래 생성"""
     try:
-        print(f"Payment API called with: {request.dict()}")
-
-        # 실제 환경에서는 여기서 결제 처리나 보상 지급 로직을 구현
-        # 현재는 시뮬레이션으로 즉시 성공 응답
+        print(f"🎯 Payment API called for user {user_id}: {request.dict()}")
 
         # 보상 지급 시뮬레이션 (90% 성공률)
         is_success = random.random() > 0.1
@@ -95,17 +126,20 @@ async def process_reward(request: RewardRequest):
                 timestamp=datetime.now().isoformat(),
             )
 
-            print(f"Creating new transaction: {new_transaction.dict()}")
+            print(
+                f"💾 Creating transaction for user {user_id}: {new_transaction.dict()}"
+            )
 
-            # PostgreSQL에 거래 내역 저장
+            # PostgreSQL에 거래 내역 저장 (실제 사용자 ID 사용)
             query = """
-            INSERT INTO transactions (id, query_text, buyer_name, primary_reward, status) 
-            VALUES (:id, :query_text, :buyer_name, :primary_reward, :status)
+            INSERT INTO transactions (id, user_id, query_text, buyer_name, primary_reward, status) 
+            VALUES (:id, :user_id, :query_text, :buyer_name, :primary_reward, :status)
             """
             await database.execute(
                 query,
                 {
                     "id": new_transaction.id,
+                    "user_id": user_id,  # 🔥 실제 JWT에서 추출한 사용자 ID!
                     "query_text": new_transaction.query,
                     "buyer_name": new_transaction.buyerName,
                     "primary_reward": new_transaction.primaryReward,
@@ -113,7 +147,7 @@ async def process_reward(request: RewardRequest):
                 },
             )
 
-            print(f"Transaction saved to database: {new_transaction.id}")
+            print(f"✅ Transaction saved for user {user_id}: {new_transaction.id}")
 
             return RewardResponse(
                 success=True,
@@ -130,7 +164,7 @@ async def process_reward(request: RewardRequest):
             )
 
     except Exception as e:
-        print(f"Payment API error: {e}")
+        print(f"❌ Payment API error for user {user_id}: {e}")
         return RewardResponse(
             success=False, message="서버 오류가 발생했습니다.", error="SERVER_ERROR"
         )

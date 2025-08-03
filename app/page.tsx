@@ -2,12 +2,12 @@
 
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
 import Header from '@/components/Header'
-import SearchInput from '@/components/main/SearchInput'
-import QualityAdvisor from '@/components/main/QualityAdvisor'
 import AuctionStatus from '@/components/main/AuctionStatus'
-import { QualityReport, Auction } from '@/lib/types'
+import QualityAdvisor from '@/components/main/QualityAdvisor'
+import SearchInput from '@/components/main/SearchInput'
+import { Auction, QualityReport } from '@/lib/types'
+import { useCallback, useEffect, useState } from 'react'
 
 export default function Home() {
   // 상태 관리
@@ -44,7 +44,7 @@ export default function Home() {
         })
 
         const data = await response.json()
-        
+
         if (data.success) {
           setQualityReport(data.data.qualityReport)
         } else {
@@ -72,7 +72,7 @@ export default function Home() {
     setIsLoading(true)
     setAuction(null) // 이전 경매 초기화
     setSelectedBid(null) // 선택된 입찰 초기화
-    
+
     try {
       const response = await fetch('/api/search', {
         method: 'POST',
@@ -83,7 +83,7 @@ export default function Home() {
       })
 
       const data = await response.json()
-      
+
       if (data.success) {
         setQualityReport(data.data.qualityReport)
         setAuction(data.data.auction)
@@ -103,9 +103,9 @@ export default function Home() {
   // 입찰 선택 처리
   const handleBidSelect = useCallback(async (bidId: string) => {
     if (!auction) return
-    
+
     console.log('Bid selection started:', { bidId, auction });
-    
+
     setIsLoading(true)
     try {
       // 1. 입찰 선택 처리
@@ -121,23 +121,25 @@ export default function Home() {
       })
 
       const auctionData = await auctionResponse.json()
-      
+
       if (auctionData.success) {
         setSelectedBid(bidId)
         const rewardAmount = auctionData.data.rewardAmount
-        
+
         // 2. 보상 지급 처리 (거래 내역에 추가)
         const selectedBid = auction.bids.find(bid => bid.id === bidId)
-        console.log('Selected bid info:', { 
-          selectedBid, 
-          auctionQuery: auction.query, 
-          buyerName: selectedBid?.buyerName 
+        console.log('Selected bid info:', {
+          selectedBid,
+          auctionQuery: auction.query,
+          buyerName: selectedBid?.buyerName
         });
-        
+
+        const token = localStorage.getItem('token')
         const rewardResponse = await fetch('/api/reward', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            ...(token && { 'Authorization': `Bearer ${token}` }),
           },
           body: JSON.stringify({
             bidId: bidId,
@@ -148,10 +150,10 @@ export default function Home() {
         })
 
         const rewardData = await rewardResponse.json()
-        
+
         if (rewardData.success) {
           showNotification('success', `1차 보상 지급 완료! ${rewardAmount.toLocaleString()}원이 지급되었습니다. 대시보드에서 2차 보상을 신청할 수 있습니다.`)
-          
+
           // 대시보드 업데이트 이벤트 발생
           window.dispatchEvent(new CustomEvent('reward-updated'))
         } else {
@@ -172,18 +174,17 @@ export default function Home() {
     <div className="min-h-screen bg-slate-900">
       {/* Header */}
       <Header />
-      
+
       {/* Notification */}
       {notification && (
-        <div className={`fixed top-20 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg transition-all duration-300 ${
-          notification.type === 'success' 
-            ? 'bg-green-600 text-white' 
+        <div className={`fixed top-20 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg transition-all duration-300 ${notification.type === 'success'
+            ? 'bg-green-600 text-white'
             : 'bg-red-600 text-white'
-        }`}>
+          }`}>
           {notification.message}
         </div>
       )}
-      
+
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Hero Section */}
@@ -192,7 +193,7 @@ export default function Home() {
             Trade Your Search Data
           </h2>
           <p className="text-xl text-slate-300 max-w-3xl mx-auto leading-relaxed">
-            Transform your search queries into valuable assets. Get real-time bids from data buyers 
+            Transform your search queries into valuable assets. Get real-time bids from data buyers
             and earn rewards for your digital footprint.
           </p>
         </section>
@@ -204,7 +205,7 @@ export default function Home() {
             <h3 className="text-2xl font-semibold mb-6 text-slate-100 text-center">
               Search Input Component
             </h3>
-            <SearchInput 
+            <SearchInput
               onQueryChange={handleQueryChange}
               onSearchSubmit={handleSearchSubmit}
               isLoading={isLoading}
@@ -214,8 +215,8 @@ export default function Home() {
           {/* Quality Advisor Component - 검색어 입력 시 표시 */}
           {(query.trim() || qualityReport) && (
             <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
-              <QualityAdvisor 
-                qualityReport={isEvaluating ? null : qualityReport} 
+              <QualityAdvisor
+                qualityReport={isEvaluating ? null : qualityReport}
               />
               {isEvaluating && (
                 <div className="text-center py-8">
@@ -229,9 +230,9 @@ export default function Home() {
           {/* Auction Status Component - 경매 시작 후 표시 */}
           {auction && (
             <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
-              <AuctionStatus 
-                auction={auction} 
-                onBidSelect={handleBidSelect} 
+              <AuctionStatus
+                auction={auction}
+                onBidSelect={handleBidSelect}
               />
             </section>
           )}

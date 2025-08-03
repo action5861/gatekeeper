@@ -1,9 +1,9 @@
 // 2차 보상을 위한 활동 증빙 제출 및 처리 (프록시)
 
-import { NextRequest, NextResponse } from 'next/server';
 import { ApiResponse } from '@/lib/types';
+import { NextRequest, NextResponse } from 'next/server';
 
-const VERIFICATION_SERVICE_URL = process.env.VERIFICATION_SERVICE_URL || 'http://localhost:8004';
+const VERIFICATION_SERVICE_URL = process.env.VERIFICATION_SERVICE_URL || 'http://verification-service:8004';
 
 export async function POST(request: NextRequest) {
   try {
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('Verify API Error:', error);
-    
+
     return NextResponse.json<ApiResponse<null>>({
       success: false,
       error: '서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'

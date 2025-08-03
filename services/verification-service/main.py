@@ -6,8 +6,6 @@ import random
 import asyncio
 from database import (
     database,
-    VerificationRequest,
-    Transaction,
     connect_to_database,
     disconnect_from_database,
 )
@@ -89,9 +87,50 @@ async def verify_proof(request: VerifyRequest):
         # (시뮬레이션) 70% 확률로 검증 성공, 30% 확률로 검증 실패
         is_verification_success = random.random() < 0.7
 
+        # 검증 요청을 DB에 저장
+        verification_query = """
+            INSERT INTO verification_requests (transaction_id, proof_file_path, verification_status, verification_result)
+            VALUES (:transaction_id, :proof_file_path, :verification_status, :verification_result)
+        """
+
+        verification_result = {
+            "searchId": request.searchId,
+            "verificationStatus": "success" if is_verification_success else "failed",
+            "reason": (
+                "제출된 증빙 자료가 기준에 미달합니다."
+                if not is_verification_success
+                else None
+            ),
+        }
+
+        await database.execute(
+            verification_query,
+            {
+                "transaction_id": request.searchId,
+                "proof_file_path": request.proof,
+                "verification_status": "completed",
+                "verification_result": verification_result,
+            },
+        )
+
         if is_verification_success:
             # 검증 성공: 2차 보상 지급
             secondary_reward_amount = random.randint(500, 3500)  # 500~3500원 랜덤
+
+            # 거래 내역 업데이트 (2차 보상 추가)
+            update_transaction_query = """
+                UPDATE transactions 
+                SET secondary_reward = :secondary_reward, status = '2차 완료'
+                WHERE id = :transaction_id
+            """
+
+            await database.execute(
+                update_transaction_query,
+                {
+                    "secondary_reward": secondary_reward_amount,
+                    "transaction_id": request.searchId,
+                },
+            )
 
             return VerifyResponse(
                 success=True,
@@ -104,7 +143,20 @@ async def verify_proof(request: VerifyRequest):
             )
 
         else:
-            # 검증 실패
+            # 검증 실패 시 거래 상태 업데이트
+            update_transaction_query = """
+                UPDATE transactions 
+                SET status = '검증 실패'
+                WHERE id = :transaction_id
+            """
+
+            await database.execute(
+                update_transaction_query,
+                {
+                    "transaction_id": request.searchId,
+                },
+            )
+
             return VerifyResponse(
                 success=False,
                 data={
@@ -130,13 +182,57 @@ async def claim_reward(transactionId: str = Form(...), proof: UploadFile = File(
 
         print(f"2차 보상 요청 접수: {transactionId}, 증빙 파일: {proof.filename}")
 
+        # 2차 보상 청구를 DB에 저장
+        claim_query = """
+            INSERT INTO verification_requests (transaction_id, proof_file_path, verification_status)
+            VALUES (:transaction_id, :proof_file_path, :verification_status)
+        """
+
+        await database.execute(
+            claim_query,
+            {
+                "transaction_id": transactionId,
+                "proof_file_path": proof.filename,
+                "verification_status": "pending",
+            },
+        )
+
         verification_result = await simulate_verification()
 
         if verification_result["success"]:
+            # 거래 내역 업데이트 (2차 보상 추가)
+            update_transaction_query = """
+                UPDATE transactions 
+                SET secondary_reward = :secondary_reward, status = '2차 완료'
+                WHERE id = :transaction_id
+            """
+
+            await database.execute(
+                update_transaction_query,
+                {
+                    "secondary_reward": verification_result["reward"],
+                    "transaction_id": transactionId,
+                },
+            )
+
             return ClaimResponse(
                 status="2차 완료", secondaryReward=verification_result["reward"]
             )
         else:
+            # 검증 실패 시 거래 상태 업데이트
+            update_transaction_query = """
+                UPDATE transactions 
+                SET status = '검증 실패'
+                WHERE id = :transaction_id
+            """
+
+            await database.execute(
+                update_transaction_query,
+                {
+                    "transaction_id": transactionId,
+                },
+            )
+
             return ClaimResponse(status="검증 실패")
 
     except Exception as e:

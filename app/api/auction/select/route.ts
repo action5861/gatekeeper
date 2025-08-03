@@ -1,9 +1,9 @@
 // 사용자의 입찰 선택 처리 (프록시)
 
-import { NextRequest, NextResponse } from 'next/server';
 import { ApiResponse } from '@/lib/types';
+import { NextRequest, NextResponse } from 'next/server';
 
-const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://localhost:8002';
+const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://auction-service:8002';
 
 export async function POST(request: NextRequest) {
   try {
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('Auction Select API Error:', error);
-    
+
     return NextResponse.json<ApiResponse<null>>({
       success: false,
       error: '서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.'
