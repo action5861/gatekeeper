@@ -64,8 +64,8 @@ export default function PerformanceHistory({ performanceHistory }: PerformanceHi
                             <div className="w-full bg-slate-700 rounded-full h-2">
                                 <div
                                     className={`h-2 rounded-full transition-all duration-500 ${isLatest
-                                            ? 'bg-gradient-to-r from-green-500 to-blue-500'
-                                            : 'bg-slate-600'
+                                        ? 'bg-gradient-to-r from-green-500 to-blue-500'
+                                        : 'bg-slate-600'
                                         }`}
                                     style={{ width: `${percentage}%` }}
                                 />

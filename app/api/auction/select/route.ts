@@ -4,11 +4,21 @@ import { ApiResponse } from '@/lib/types';
 import { NextRequest, NextResponse } from 'next/server';
 
 const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://auction-service:8002';
+const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://user-service:8005';
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { searchId, selectedBidId } = body;
+
+    // 사용자 인증 확인
+    const authHeader = request.headers.get('authorization');
+    if (!authHeader) {
+      return NextResponse.json<ApiResponse<null>>({
+        success: false,
+        error: '인증이 필요합니다.'
+      }, { status: 401 });
+    }
 
     // 입력값 유효성 검사
     if (!searchId || typeof searchId !== 'string') {
@@ -30,6 +40,7 @@ export async function POST(request: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': authHeader, // 사용자 정보 전달
       },
       body: JSON.stringify({ searchId, selectedBidId }),
     });
@@ -39,6 +50,30 @@ export async function POST(request: NextRequest) {
     }
 
     const auctionData = await auctionResponse.json();
+
+    // User Service에 경매 완료 알림 (비동기)
+    try {
+      const userServiceResponse = await fetch(`${USER_SERVICE_URL}/auction-completed`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+        },
+        body: JSON.stringify({
+          search_id: searchId,
+          selected_bid_id: selectedBidId,
+          reward_amount: auctionData.data.rewardAmount
+        }),
+      });
+
+      if (userServiceResponse.ok) {
+        console.log('✅ Auction completion notified to user service');
+      } else {
+        console.warn('⚠️ Failed to notify auction completion to user service');
+      }
+    } catch (error) {
+      console.warn('⚠️ User service error (non-critical):', error);
+    }
 
     return NextResponse.json<ApiResponse<{ rewardAmount: number; searchId: string; selectedBidId: string }>>({
       success: true,
@@ -63,7 +98,7 @@ export async function OPTIONS() {
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     },
   });
 } 

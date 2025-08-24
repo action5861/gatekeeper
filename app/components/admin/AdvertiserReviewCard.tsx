@@ -162,7 +162,7 @@ export default function AdvertiserReviewCard({
                             <CategorySelector
                                 categories={editingCategories}
                                 onCategoriesChange={setEditingCategories}
-                                maxCategories={3}
+                                maxCategories={5}
                             />
                         </div>
                     </div>
@@ -212,15 +212,36 @@ export default function AdvertiserReviewCard({
                         {/* Review Notes */}
                         <div className="mb-6">
                             <label className="block text-sm font-medium text-slate-300 mb-2">
-                                심사 메모
+                                심사 메모 <span className="text-red-400">*</span>
                             </label>
+                            <div className="mb-2">
+                                <select
+                                    onChange={(e) => {
+                                        if (e.target.value) {
+                                            setReviewNotes(e.target.value)
+                                        }
+                                    }}
+                                    className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+                                >
+                                    <option value="">거절 사유 템플릿 선택 (선택사항)</option>
+                                    <option value="웹사이트 정보가 부족합니다. 더 자세한 정보를 제공해주세요.">웹사이트 정보 부족</option>
+                                    <option value="키워드가 너무 일반적입니다. 더 구체적인 키워드를 사용해주세요.">키워드가 너무 일반적</option>
+                                    <option value="카테고리 선택이 부적절합니다. 비즈니스에 맞는 카테고리를 선택해주세요.">카테고리 선택 부적절</option>
+                                    <option value="웹사이트가 아직 완성되지 않았습니다. 완성 후 다시 신청해주세요.">웹사이트 미완성</option>
+                                    <option value="비즈니스 정보가 불명확합니다. 명확한 정보를 제공해주세요.">비즈니스 정보 불명확</option>
+                                    <option value="기타 사유로 인해 승인할 수 없습니다. 자세한 내용은 문의해주세요.">기타 사유</option>
+                                </select>
+                            </div>
                             <textarea
                                 value={reviewNotes}
                                 onChange={(e) => setReviewNotes(e.target.value)}
-                                placeholder="심사 결과에 대한 메모를 입력하세요..."
+                                placeholder="승인 시: 승인 사유나 권장사항을 입력하세요.&#10;거절 시: 거절 사유를 반드시 입력해주세요."
                                 rows={4}
                                 className="w-full px-3 py-2 bg-slate-700/50 border border-slate-600 rounded text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
+                            {!reviewNotes.trim() && (
+                                <p className="text-sm text-red-400 mt-1">거절 시에는 반드시 거절 사유를 입력해주세요.</p>
+                            )}
                         </div>
 
                         {/* Action Buttons */}
@@ -228,7 +249,8 @@ export default function AdvertiserReviewCard({
                             <button
                                 onClick={handleReject}
                                 disabled={isSubmitting || !reviewNotes.trim()}
-                                className="flex items-center space-x-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+                                className="flex items-center space-x-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                title={!reviewNotes.trim() ? "거절 사유를 입력해주세요" : "광고주를 거절합니다"}
                             >
                                 <XCircle className="w-4 h-4" />
                                 <span>거절</span>
@@ -237,6 +259,7 @@ export default function AdvertiserReviewCard({
                                 onClick={handleApprove}
                                 disabled={isSubmitting}
                                 className="flex items-center space-x-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+                                title="광고주를 승인합니다"
                             >
                                 <CheckCircle className="w-4 h-4" />
                                 <span>승인</span>

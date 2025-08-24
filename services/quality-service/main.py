@@ -35,7 +35,15 @@ app.add_middleware(
 
 # Pydantic 모델
 class SubmissionLimit(BaseModel):
-    level: Literal["Excellent", "Good", "Average", "Needs Improvement"]
+    level: Literal[
+        "Excellent",
+        "Very Good",
+        "Good",
+        "Average",
+        "Below Average",
+        "Poor",
+        "Very Poor",
+    ]
     dailyMax: int
 
 
@@ -50,23 +58,45 @@ class CalculateLimitResponse(BaseModel):
 
 
 def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    """동적 제출 한도를 계산합니다."""
-    base_limit = 20  # Base daily limit
+    """품질 점수에 따른 동적 제출 한도를 계산합니다."""
+    base_limit = 5  # 기본 일일 한도를 5개로 변경
+    print(f"🔍 디버그: quality_score={quality_score}, base_limit={base_limit}")
 
-    if quality_score >= 90:
-        # 'Excellent' grade: 200% of base limit
-        return SubmissionLimit(level="Excellent", dailyMax=base_limit * 2)
+    if quality_score >= 95:
+        # 'Excellent' 등급: 300% (15개)
+        result = SubmissionLimit(level="Excellent", dailyMax=base_limit * 3)
+        print(f"🔍 디버그: Excellent 등급, dailyMax={result.dailyMax}")
+        return result
+    elif quality_score >= 90:
+        # 'Very Good' 등급: 200% (10개)
+        result = SubmissionLimit(level="Very Good", dailyMax=base_limit * 2)
+        print(f"🔍 디버그: Very Good 등급, dailyMax={result.dailyMax}")
+        return result
+    elif quality_score >= 80:
+        # 'Good' 등급: 160% (8개)
+        result = SubmissionLimit(level="Good", dailyMax=int(base_limit * 1.6))
+        print(f"🔍 디버그: Good 등급, dailyMax={result.dailyMax}")
+        return result
     elif quality_score >= 70:
-        # 'Good' grade: Maintain base limit (100%)
-        return SubmissionLimit(level="Good", dailyMax=base_limit)
+        # 'Average' 등급: 120% (6개)
+        result = SubmissionLimit(level="Average", dailyMax=int(base_limit * 1.2))
+        print(f"🔍 디버그: Average 등급, dailyMax={result.dailyMax}")
+        return result
     elif quality_score >= 50:
-        # 'Average' grade: 70% of base limit
-        return SubmissionLimit(level="Average", dailyMax=int(base_limit * 0.7))
+        # 'Below Average' 등급: 100% (5개)
+        result = SubmissionLimit(level="Below Average", dailyMax=base_limit)
+        print(f"🔍 디버그: Below Average 등급, dailyMax={result.dailyMax}")
+        return result
+    elif quality_score >= 30:
+        # 'Poor' 등급: 60% (3개)
+        result = SubmissionLimit(level="Poor", dailyMax=int(base_limit * 0.6))
+        print(f"🔍 디버그: Poor 등급, dailyMax={result.dailyMax}")
+        return result
     else:
-        # 'Needs Improvement' grade: 30% of base limit
-        return SubmissionLimit(
-            level="Needs Improvement", dailyMax=int(base_limit * 0.3)
-        )
+        # 'Very Poor' 등급: 40% (2개)
+        result = SubmissionLimit(level="Very Poor", dailyMax=int(base_limit * 0.4))
+        print(f"🔍 디버그: Very Poor 등급, dailyMax={result.dailyMax}")
+        return result
 
 
 @app.post("/calculate-limit", response_model=CalculateLimitResponse)

@@ -9,7 +9,7 @@ import { logComponentError } from '@/lib/utils/errorMonitor';
 import { AlertCircle, FileCheck2, Target, TrendingUp } from 'lucide-react';
 
 interface SubmissionLimitData {
-  level: 'Excellent' | 'Good' | 'Average' | 'Needs Improvement';
+  level: 'Excellent' | 'Very Good' | 'Good' | 'Average' | 'Below Average' | 'Poor' | 'Very Poor';
   dailyMax: number;
 }
 
@@ -22,16 +22,22 @@ interface DailySubmissionData {
 
 const levelStyles = {
   'Excellent': 'bg-blue-500 text-white',
+  'Very Good': 'bg-green-600 text-white',
   'Good': 'bg-green-500 text-white',
   'Average': 'bg-yellow-500 text-black',
-  'Needs Improvement': 'bg-red-500 text-white',
+  'Below Average': 'bg-orange-500 text-white',
+  'Poor': 'bg-red-500 text-white',
+  'Very Poor': 'bg-red-600 text-white',
 };
 
 const levelDescriptions = {
-  'Excellent': 'Excellent quality - 200% daily limit',
-  'Good': 'Good quality - Standard daily limit',
-  'Average': 'Average quality - 70% daily limit',
-  'Needs Improvement': 'Needs improvement - 30% daily limit',
+  'Excellent': 'Excellent quality - 300% daily limit (15 submissions)',
+  'Very Good': 'Very good quality - 200% daily limit (10 submissions)',
+  'Good': 'Good quality - 160% daily limit (8 submissions)',
+  'Average': 'Average quality - 120% daily limit (6 submissions)',
+  'Below Average': 'Below average quality - 100% daily limit (5 submissions)',
+  'Poor': 'Poor quality - 60% daily limit (3 submissions)',
+  'Very Poor': 'Very poor quality - 40% daily limit (2 submissions)',
 };
 
 export default function SubmissionLimitCard() {
@@ -81,11 +87,17 @@ export default function SubmissionLimitCard() {
     switch (level) {
       case 'Excellent':
         return <TrendingUp className="w-5 h-5" />;
+      case 'Very Good':
+        return <TrendingUp className="w-5 h-5" />;
       case 'Good':
         return <FileCheck2 className="w-5 h-5" />;
       case 'Average':
         return <AlertCircle className="w-5 h-5" />;
-      case 'Needs Improvement':
+      case 'Below Average':
+        return <AlertCircle className="w-5 h-5" />;
+      case 'Poor':
+        return <AlertCircle className="w-5 h-5" />;
+      case 'Very Poor':
         return <AlertCircle className="w-5 h-5" />;
       default:
         return <FileCheck2 className="w-5 h-5" />;

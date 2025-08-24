@@ -5,11 +5,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Literal
 from dataclasses import dataclass
 from enum import Enum
+import re
+import html
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, validator, Field
 import httpx
 import os
 from jose import JWTError, jwt
@@ -43,6 +45,107 @@ app = FastAPI(title="Advertiser Service", version="1.0.0")
 async def startup():
     await connect_to_database()
 
+    # 카테고리 데이터 확인 및 초기화
+    try:
+        # 카테고리 데이터가 있는지 확인
+        category_count = await database.fetch_val(
+            "SELECT COUNT(*) FROM business_categories"
+        )
+
+        if category_count == 0:
+            print("카테고리 데이터가 없습니다. 기본 카테고리를 삽입합니다...")
+
+            # 기본 카테고리 데이터 삽입
+            await database.execute_many(
+                """
+                INSERT INTO business_categories (name, path, level, sort_order) 
+                VALUES (:name, :path, :level, :sort_order)
+                """,
+                [
+                    {
+                        "name": "전자제품",
+                        "path": "전자제품",
+                        "level": 1,
+                        "sort_order": 1,
+                    },
+                    {
+                        "name": "패션/뷰티",
+                        "path": "패션/뷰티",
+                        "level": 1,
+                        "sort_order": 2,
+                    },
+                    {
+                        "name": "생활/건강",
+                        "path": "생활/건강",
+                        "level": 1,
+                        "sort_order": 3,
+                    },
+                    {
+                        "name": "식품/음료",
+                        "path": "식품/음료",
+                        "level": 1,
+                        "sort_order": 4,
+                    },
+                    {
+                        "name": "스포츠/레저/자동차",
+                        "path": "스포츠/레저/자동차",
+                        "level": 1,
+                        "sort_order": 5,
+                    },
+                    {
+                        "name": "유아/아동",
+                        "path": "유아/아동",
+                        "level": 1,
+                        "sort_order": 6,
+                    },
+                    {
+                        "name": "여행/문화",
+                        "path": "여행/문화",
+                        "level": 1,
+                        "sort_order": 7,
+                    },
+                    {
+                        "name": "반려동물",
+                        "path": "반려동물",
+                        "level": 1,
+                        "sort_order": 8,
+                    },
+                    {
+                        "name": "디지털 콘텐츠",
+                        "path": "디지털 콘텐츠",
+                        "level": 1,
+                        "sort_order": 9,
+                    },
+                    {
+                        "name": "부동산/인테리어",
+                        "path": "부동산/인테리어",
+                        "level": 1,
+                        "sort_order": 10,
+                    },
+                    {
+                        "name": "의료/건강",
+                        "path": "의료/건강",
+                        "level": 1,
+                        "sort_order": 11,
+                    },
+                    {"name": "서비스", "path": "서비스", "level": 1, "sort_order": 12},
+                    {
+                        "name": "교육/도서",
+                        "path": "교육/도서",
+                        "level": 1,
+                        "sort_order": 13,
+                    },
+                ],
+            )
+
+            print(f"기본 카테고리 {category_count}개가 삽입되었습니다.")
+        else:
+            print(f"데이터베이스에 {category_count}개의 카테고리가 있습니다.")
+
+    except Exception as e:
+        print(f"카테고리 데이터 초기화 중 오류 발생: {e}")
+        print("서비스는 계속 실행됩니다.")
+
 
 # 🛑 종료 이벤트
 @app.on_event("shutdown")
@@ -60,9 +163,11 @@ app.add_middleware(
 )
 
 # Security configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
+SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production"
+)
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
 # bcrypt 버전 호환성을 위한 설정 수정
 try:
@@ -75,44 +180,185 @@ except Exception as e:
 security = HTTPBearer()
 
 
+# 입력값 검증 함수들
+def sanitize_input(value: str) -> str:
+    """XSS 방지를 위한 입력값 이스케이핑"""
+    if not isinstance(value, str):
+        return str(value)
+    return html.escape(value.strip())
+
+
+def validate_password_strength(password: str) -> bool:
+    """비밀번호 강도 검증"""
+    if len(password) < 8:
+        return False
+    if not re.search(r"[A-Z]", password):
+        return False
+    if not re.search(r"[a-z]", password):
+        return False
+    if not re.search(r"\d", password):
+        return False
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        return False
+    return True
+
+
+def validate_sql_injection(value: str) -> bool:
+    """SQL Injection 방지를 위한 검증"""
+    sql_patterns = [
+        r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|SCRIPT)\b)",
+        r"(\b(OR|AND)\b\s+\d+\s*=\s*\d+)",
+        r"(\b(OR|AND)\b\s+['\"]?\w+['\"]?\s*=\s*['\"]?\w+['\"]?)",
+        r"(--|#|/\*|\*/)",
+        r"(\b(WAITFOR|DELAY)\b)",
+        r"(\b(BENCHMARK|SLEEP)\b)",
+    ]
+
+    value_upper = value.upper()
+    for pattern in sql_patterns:
+        if re.search(pattern, value_upper, re.IGNORECASE):
+            return False
+    return True
+
+
+def validate_url(url: str) -> bool:
+    """URL 형식 검증"""
+    url_pattern = re.compile(
+        r"^https?://"  # http:// or https://
+        r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|"  # domain...
+        r"localhost|"  # localhost...
+        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"  # ...or ip
+        r"(?::\d+)?"  # optional port
+        r"(?:/?|[/?]\S+)$",
+        re.IGNORECASE,
+    )
+    return bool(url_pattern.match(url))
+
+
 # Pydantic 모델
 class PerformanceHistory(BaseModel):
-    name: str
-    score: int
+    name: str = Field(..., max_length=100)
+    score: int = Field(..., ge=0, le=100)
+
+    @validator("name")
+    def validate_name(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("이름에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class BiddingSummary(BaseModel):
-    totalBids: int
-    successfulBids: int
-    totalSpent: int
-    averageBidAmount: float
+    totalBids: int = Field(..., ge=0)
+    successfulBids: int = Field(..., ge=0)
+    totalSpent: int = Field(..., ge=0)
+    averageBidAmount: float = Field(..., ge=0)
 
 
 class DashboardResponse(BaseModel):
     biddingSummary: BiddingSummary
     performanceHistory: List[PerformanceHistory]
     recentBids: List[dict]
+    additionalStats: Optional[dict] = None
 
 
 class BusinessSetupData(BaseModel):
-    websiteUrl: str
-    keywords: List[str]
-    categories: List[int]
-    dailyBudget: int
+    websiteUrl: str = Field(..., max_length=500)
+    keywords: List[str] = Field(..., description="키워드 목록")
+    categories: List[int] = Field(..., description="카테고리 ID 목록")
+    dailyBudget: int = Field(..., ge=1000, le=10000000)
     bidRange: dict
+
+    @validator("websiteUrl")
+    def validate_website_url(cls, v):
+        v = sanitize_input(v)
+        if not validate_url(v):
+            raise ValueError("올바른 URL 형식이 아닙니다")
+        if not validate_sql_injection(v):
+            raise ValueError("웹사이트 URL에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("keywords")
+    def validate_keywords(cls, v):
+        if len(v) > 100:
+            raise ValueError("키워드는 최대 100개까지 입력 가능합니다")
+        for keyword in v:
+            keyword = sanitize_input(keyword)
+            if len(keyword) > 50:
+                raise ValueError("키워드는 최대 50자까지 입력 가능합니다")
+            if not validate_sql_injection(keyword):
+                raise ValueError("키워드에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("categories")
+    def validate_categories(cls, v):
+        if len(v) > 50:
+            raise ValueError("카테고리는 최대 50개까지 선택 가능합니다")
+        for category_id in v:
+            if not isinstance(category_id, int) or category_id < 1:
+                raise ValueError("올바른 카테고리 ID가 아닙니다")
+        return v
 
 
 class AdvertiserRegister(BaseModel):
-    username: str
-    email: str
-    password: str
-    company_name: str
+    username: str = Field(..., min_length=3, max_length=50, description="사용자명")
+    email: EmailStr = Field(..., description="이메일 주소")
+    password: str = Field(..., min_length=8, max_length=128, description="비밀번호")
+    company_name: str = Field(..., min_length=2, max_length=100, description="회사명")
     business_setup: Optional[BusinessSetupData] = None
+
+    @validator("username")
+    def validate_username(cls, v):
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_가-힣]+$", v):
+            raise ValueError(
+                "사용자명은 영문, 숫자, 언더스코어, 한글만 사용 가능합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("사용자명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("email")
+    def validate_email(cls, v):
+        v = sanitize_input(v.lower())
+        if not validate_sql_injection(v):
+            raise ValueError("이메일에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        if not validate_password_strength(v):
+            raise ValueError(
+                "비밀번호는 최소 8자 이상이며, 대문자, 소문자, 숫자, 특수문자를 포함해야 합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("비밀번호에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("company_name")
+    def validate_company_name(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("회사명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class AdvertiserLogin(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., description="사용자명 또는 이메일")
+    password: str = Field(..., description="비밀번호")
+
+    @validator("username")
+    def validate_username(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("사용자명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        if not validate_sql_injection(v):
+            raise ValueError("비밀번호에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class Token(BaseModel):
@@ -284,6 +530,10 @@ async def save_business_setup_data(
 ):
     """비즈니스 설정 데이터를 관련 테이블에 저장"""
     try:
+        print(f"Saving business setup data for advertiser_id: {advertiser_id}")
+        print(f"Keywords: {business_setup.keywords}")
+        print(f"Categories: {business_setup.categories}")
+
         # 1. 키워드 저장
         for keyword in business_setup.keywords:
             await database.execute(
@@ -298,28 +548,78 @@ async def save_business_setup_data(
                     "match_type": "broad",
                 },
             )
+            print(f"Saved keyword: {keyword}")
 
         # 2. 카테고리 저장
         for category_id in business_setup.categories:
-            # 카테고리 정보 조회
-            category_info = await database.fetch_one(
-                "SELECT name, path, level FROM business_categories WHERE id = :category_id",
-                {"category_id": category_id},
-            )
+            print(f"Processing category_id: {category_id}")
 
-            if category_info:
-                await database.execute(
-                    """
-                    INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
-                    VALUES (:advertiser_id, :category_path, :category_level, :is_primary)
-                    """,
-                    {
-                        "advertiser_id": advertiser_id,
-                        "category_path": category_info["path"],
-                        "category_level": category_info["level"],
-                        "is_primary": False,  # 첫 번째 카테고리를 주 카테고리로 설정할 수 있음
-                    },
+            try:
+                # 카테고리 정보 조회
+                category_info = await database.fetch_one(
+                    "SELECT name, path, level FROM business_categories WHERE id = :category_id",
+                    {"category_id": category_id},
                 )
+
+                if category_info:
+                    print(f"Found category info: {category_info}")
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
+                        VALUES (:advertiser_id, :category_path, :category_level, :is_primary)
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "category_path": category_info["path"],
+                            "category_level": category_info["level"],
+                            "is_primary": False,  # 첫 번째 카테고리를 주 카테고리로 설정할 수 있음
+                        },
+                    )
+                    print(
+                        f"Saved category: {category_info['name']} (ID: {category_id})"
+                    )
+                else:
+                    print(
+                        f"Warning: Category info not found for category_id: {category_id}"
+                    )
+                    # 카테고리 정보가 없어도 기본값으로 저장
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
+                        VALUES (:advertiser_id, :category_path, :category_level, :is_primary)
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "category_path": f"Unknown Category {category_id}",
+                            "category_level": 1,
+                            "is_primary": False,
+                        },
+                    )
+                    print(f"Saved category with default values for ID: {category_id}")
+
+            except Exception as e:
+                print(f"Error processing category {category_id}: {e}")
+                # 에러가 발생해도 기본값으로 저장
+                try:
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
+                        VALUES (:advertiser_id, :category_path, :category_level, :is_primary)
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "category_path": f"Category {category_id}",
+                            "category_level": 1,
+                            "is_primary": False,
+                        },
+                    )
+                    print(
+                        f"Saved category {category_id} with fallback values after error"
+                    )
+                except Exception as inner_e:
+                    print(
+                        f"Failed to save category {category_id} even with fallback: {inner_e}"
+                    )
 
         # 3. 자동 입찰 설정 저장
         await database.execute(
@@ -342,10 +642,13 @@ async def save_business_setup_data(
             },
         )
 
-        print(f"Business setup data saved for advertiser_id: {advertiser_id}")
+        print(
+            f"Business setup data saved successfully for advertiser_id: {advertiser_id}"
+        )
 
     except Exception as e:
         print(f"Error saving business setup data: {e}")
+        print(f"Error details: {str(e)}")
         raise e
 
 
@@ -416,77 +719,181 @@ async def get_review_status(current_advertiser: dict = Depends(get_current_adver
 # Admin API Endpoints
 @app.get("/admin/pending-reviews")
 async def get_pending_reviews():
-    """관리자: 심사 대기 중인 광고주 목록 조회"""
+    """심사 대기 중인 광고주 목록 조회"""
     try:
         # 심사 대기 중인 광고주 조회
-        query = """
-        SELECT 
-            ar.id,
-            ar.advertiser_id,
-            a.company_name,
-            a.email,
-            a.website_url,
-            a.daily_budget,
-            a.created_at,
-            ar.review_status,
-            ar.review_notes,
-            ar.recommended_bid_min,
-            ar.recommended_bid_max
-        FROM advertiser_reviews ar
-        JOIN advertisers a ON ar.advertiser_id = a.id
-        WHERE ar.review_status = 'pending'
-        ORDER BY ar.created_at ASC
-        """
-
-        reviews = await database.fetch_all(query)
-
-        # 각 광고주의 키워드와 카테고리 정보 조회
-        advertisers_data = []
-        for review in reviews:
-            # 키워드 조회
-            keywords_query = """
-            SELECT keyword FROM advertiser_keywords 
-            WHERE advertiser_id = :advertiser_id
+        advertisers = await database.fetch_all(
             """
-            keywords_result = await database.fetch_all(
-                keywords_query, {"advertiser_id": review["advertiser_id"]}
+            SELECT 
+                ar.id, ar.advertiser_id, adv.company_name, adv.email, adv.website_url, 
+                adv.daily_budget, ar.created_at, ar.review_status, ar.review_notes,
+                ar.recommended_bid_min, ar.recommended_bid_max
+            FROM advertiser_reviews ar
+            JOIN advertisers adv ON ar.advertiser_id = adv.id
+            WHERE ar.review_status = 'pending'
+            ORDER BY ar.created_at ASC
+            """
+        )
+
+        # 각 광고주의 키워드와 카테고리 정보 가져오기
+        result = []
+        for advertiser in advertisers:
+            # 키워드 조회
+            keywords = await database.fetch_all(
+                "SELECT keyword FROM advertiser_keywords WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
             )
-            keywords = [row["keyword"] for row in keywords_result]
 
             # 카테고리 조회
-            categories_query = """
-            SELECT category_path FROM advertiser_categories 
-            WHERE advertiser_id = :advertiser_id
-            """
-            categories_result = await database.fetch_all(
-                categories_query, {"advertiser_id": review["advertiser_id"]}
+            categories = await database.fetch_all(
+                "SELECT category_path FROM advertiser_categories WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
             )
-            categories = [row["category_path"] for row in categories_result]
 
-            advertisers_data.append(
+            result.append(
                 {
-                    "id": review["id"],
-                    "advertiser_id": review["advertiser_id"],
-                    "company_name": review["company_name"],
-                    "email": review["email"],
-                    "website_url": review["website_url"],
-                    "daily_budget": float(review["daily_budget"]),
-                    "created_at": review["created_at"].isoformat(),
-                    "keywords": keywords,
-                    "categories": categories,
-                    "review_status": review["review_status"],
-                    "review_notes": review["review_notes"],
-                    "recommended_bid_min": review["recommended_bid_min"],
-                    "recommended_bid_max": review["recommended_bid_max"],
+                    "id": advertiser["id"],
+                    "advertiser_id": advertiser["advertiser_id"],
+                    "company_name": advertiser["company_name"],
+                    "email": advertiser["email"],
+                    "website_url": advertiser["website_url"],
+                    "daily_budget": float(advertiser["daily_budget"]),
+                    "created_at": advertiser["created_at"].isoformat(),
+                    "review_status": advertiser["review_status"],
+                    "review_notes": advertiser["review_notes"],
+                    "recommended_bid_min": advertiser["recommended_bid_min"],
+                    "recommended_bid_max": advertiser["recommended_bid_max"],
+                    "keywords": [kw["keyword"] for kw in keywords],
+                    "categories": [cat["category_path"] for cat in categories],
                 }
             )
 
-        return {"advertisers": advertisers_data}
+        return {"advertisers": result}
 
     except Exception as e:
         print(f"Error fetching pending reviews: {e}")
         raise HTTPException(
-            status_code=500, detail=f"심사 대기 목록 조회 실패: {str(e)}"
+            status_code=500, detail=f"Failed to fetch pending reviews: {str(e)}"
+        )
+
+
+@app.get("/admin/rejected-advertisers")
+async def get_rejected_advertisers():
+    """거절된 광고주 목록 조회"""
+    try:
+        # 거절된 광고주 조회
+        advertisers = await database.fetch_all(
+            """
+            SELECT 
+                ar.id, ar.advertiser_id, adv.company_name, adv.email, adv.website_url, 
+                adv.daily_budget, ar.created_at, ar.review_status, ar.review_notes,
+                ar.recommended_bid_min, ar.recommended_bid_max
+            FROM advertiser_reviews ar
+            JOIN advertisers adv ON ar.advertiser_id = adv.id
+            WHERE ar.review_status = 'rejected'
+            ORDER BY ar.created_at DESC
+            """
+        )
+
+        # 각 광고주의 키워드와 카테고리 정보 가져오기
+        result = []
+        for advertiser in advertisers:
+            # 키워드 조회
+            keywords = await database.fetch_all(
+                "SELECT keyword FROM advertiser_keywords WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
+            )
+
+            # 카테고리 조회
+            categories = await database.fetch_all(
+                "SELECT category_path FROM advertiser_categories WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
+            )
+
+            result.append(
+                {
+                    "id": advertiser["id"],
+                    "advertiser_id": advertiser["advertiser_id"],
+                    "company_name": advertiser["company_name"],
+                    "email": advertiser["email"],
+                    "website_url": advertiser["website_url"],
+                    "daily_budget": float(advertiser["daily_budget"]),
+                    "created_at": advertiser["created_at"].isoformat(),
+                    "review_status": advertiser["review_status"],
+                    "review_notes": advertiser["review_notes"],
+                    "recommended_bid_min": advertiser["recommended_bid_min"],
+                    "recommended_bid_max": advertiser["recommended_bid_max"],
+                    "keywords": [kw["keyword"] for kw in keywords],
+                    "categories": [cat["category_path"] for cat in categories],
+                }
+            )
+
+        return {"advertisers": result}
+
+    except Exception as e:
+        print(f"Error fetching rejected advertisers: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch rejected advertisers: {str(e)}"
+        )
+
+
+@app.get("/admin/approved-advertisers")
+async def get_approved_advertisers():
+    """승인된 광고주 목록 조회"""
+    try:
+        # 승인된 광고주 조회
+        advertisers = await database.fetch_all(
+            """
+            SELECT 
+                ar.id, ar.advertiser_id, adv.company_name, adv.email, adv.website_url, 
+                adv.daily_budget, ar.created_at, ar.review_status, ar.review_notes,
+                ar.recommended_bid_min, ar.recommended_bid_max
+            FROM advertiser_reviews ar
+            JOIN advertisers adv ON ar.advertiser_id = adv.id
+            WHERE ar.review_status = 'approved'
+            ORDER BY ar.created_at DESC
+            """
+        )
+
+        # 각 광고주의 키워드와 카테고리 정보 가져오기
+        result = []
+        for advertiser in advertisers:
+            # 키워드 조회
+            keywords = await database.fetch_all(
+                "SELECT keyword FROM advertiser_keywords WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
+            )
+
+            # 카테고리 조회
+            categories = await database.fetch_all(
+                "SELECT category_path FROM advertiser_categories WHERE advertiser_id = :advertiser_id",
+                {"advertiser_id": advertiser["advertiser_id"]},
+            )
+
+            result.append(
+                {
+                    "id": advertiser["id"],
+                    "advertiser_id": advertiser["advertiser_id"],
+                    "company_name": advertiser["company_name"],
+                    "email": advertiser["email"],
+                    "website_url": advertiser["website_url"],
+                    "daily_budget": float(advertiser["daily_budget"]),
+                    "created_at": advertiser["created_at"].isoformat(),
+                    "review_status": advertiser["review_status"],
+                    "review_notes": advertiser["review_notes"],
+                    "recommended_bid_min": advertiser["recommended_bid_min"],
+                    "recommended_bid_max": advertiser["recommended_bid_max"],
+                    "keywords": [kw["keyword"] for kw in keywords],
+                    "categories": [cat["category_path"] for cat in categories],
+                }
+            )
+
+        return {"advertisers": result}
+
+    except Exception as e:
+        print(f"Error fetching approved advertisers: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch approved advertisers: {str(e)}"
         )
 
 
@@ -679,17 +1086,229 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
 
         review_status = review_info["review_status"] if review_info else "pending"
 
-        # 최근 입찰 내역 가져오기 (심사 승인된 경우에만)
-        recent_bids = []
+        # 실제 입찰 데이터 조회 (심사 승인된 경우에만)
         if review_status == "approved":
-            recent_bids = await get_recent_bids()
-        print(f"Dashboard returning bids: {len(recent_bids)}")
+            print(f"🔍 심사 승인됨 - 실제 데이터 조회 시작")
 
-        # 입찰 요약 계산 (시뮬레이션 데이터)
-        total_bids = 150 if review_status == "approved" else 0
-        successful_bids = 120 if review_status == "approved" else 0
-        total_spent = 45000 if review_status == "approved" else 0
-        average_bid_amount = total_spent / total_bids if total_bids > 0 else 0
+            try:
+                # 1. 실제 입찰 요약 계산
+                bid_summary_query = """
+                    SELECT 
+                        COUNT(*) as total_bids,
+                        COUNT(CASE WHEN bid_result = 'won' THEN 1 END) as successful_bids,
+                        SUM(bid_amount) as total_spent,
+                        AVG(bid_amount) as avg_bid_amount
+                    FROM auto_bid_logs 
+                    WHERE advertiser_id = :advertiser_id
+                    AND created_at >= CURRENT_DATE - INTERVAL '30 days'
+                """
+                bid_summary = await database.fetch_one(
+                    bid_summary_query, {"advertiser_id": advertiser_id}
+                )
+
+                print(f"🔍 DB 조회 결과: {bid_summary}")
+
+                if bid_summary:
+                    total_bids = int(bid_summary["total_bids"] or 0)
+                    successful_bids = int(bid_summary["successful_bids"] or 0)
+                    total_spent = int(bid_summary["total_spent"] or 0)
+                    average_bid_amount = float(bid_summary["avg_bid_amount"] or 0)
+                    print(
+                        f"🔍 실제 데이터: 총입찰={total_bids}, 성공={successful_bids}, 지출={total_spent}"
+                    )
+                else:
+                    total_bids = 0
+                    successful_bids = 0
+                    total_spent = 0
+                    average_bid_amount = 0
+                    print(f"🔍 DB 데이터 없음 - 기본값 사용")
+            except Exception as e:
+                print(f"🔍 입찰 요약 계산 오류: {e}")
+                raise e
+
+            try:
+                # 2. 자동입찰 설정 및 예산 현황
+                auto_bid_settings_query = """
+                    SELECT 
+                        is_enabled,
+                        daily_budget,
+                        max_bid_per_keyword,
+                        min_quality_score
+                    FROM auto_bid_settings 
+                    WHERE advertiser_id = :advertiser_id
+                """
+                auto_bid_settings = await database.fetch_one(
+                    auto_bid_settings_query, {"advertiser_id": advertiser_id}
+                )
+
+                # 오늘 지출액 계산
+                today_spent_query = """
+                    SELECT COALESCE(SUM(bid_amount), 0) as today_spent
+                    FROM auto_bid_logs 
+                    WHERE advertiser_id = :advertiser_id
+                    AND DATE(created_at) = CURRENT_DATE
+                """
+                today_spent_result = await database.fetch_one(
+                    today_spent_query, {"advertiser_id": advertiser_id}
+                )
+                today_spent = int(
+                    today_spent_result["today_spent"] if today_spent_result else 0
+                )
+
+                # 예산 사용률 계산
+                daily_budget = float(
+                    auto_bid_settings["daily_budget"] if auto_bid_settings else 10000
+                )
+                budget_usage_percent = (
+                    (today_spent / daily_budget * 100) if daily_budget > 0 else 0
+                )
+            except Exception as e:
+                print(f"🔍 자동입찰 설정 조회 오류: {e}")
+                raise e
+
+            try:
+                # 3. 최근 입찰 내역 조회
+                recent_bids_query = """
+                    SELECT 
+                        id,
+                        search_query,
+                        bid_amount as amount,
+                        created_at as timestamp,
+                        bid_result as status,
+                        match_score,
+                        quality_score
+                    FROM auto_bid_logs 
+                    WHERE advertiser_id = :advertiser_id
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """
+                recent_bids_data = await database.fetch_all(
+                    recent_bids_query, {"advertiser_id": advertiser_id}
+                )
+
+                recent_bids = []
+                print(f"🔍 최근 입찰 데이터 개수: {len(recent_bids_data)}")
+                for i, bid in enumerate(recent_bids_data):
+                    print(f"🔍 입찰 {i+1}: {bid}")
+                    try:
+                        recent_bids.append(
+                            {
+                                "id": bid["id"],
+                                "auctionId": bid["search_query"],
+                                "amount": bid["amount"],
+                                "timestamp": (
+                                    bid["timestamp"].isoformat()
+                                    if bid["timestamp"]
+                                    else ""
+                                ),
+                                "status": bid["status"],
+                                "highestBid": bid[
+                                    "amount"
+                                ],  # 실제로는 경매에서 최고가를 가져와야 함
+                                "myBid": bid["amount"],
+                            }
+                        )
+                    except Exception as e:
+                        print(f"🔍 입찰 {i+1} 처리 오류: {e}")
+                        print(f"🔍 bid 객체: {bid}")
+                        raise e
+            except Exception as e:
+                print(f"🔍 최근 입찰 내역 조회 오류: {e}")
+                raise e
+
+            try:
+                # 4. 성과 이력 (주차별 성공률)
+                performance_query = """
+                    SELECT 
+                        DATE_TRUNC('week', created_at) as week_start,
+                        COUNT(*) as total_bids,
+                        COUNT(CASE WHEN bid_result = 'won' THEN 1 END) as won_bids,
+                        AVG(match_score) as avg_match_score
+                    FROM auto_bid_logs 
+                    WHERE advertiser_id = :advertiser_id
+                    AND created_at >= CURRENT_DATE - INTERVAL '4 weeks'
+                    GROUP BY DATE_TRUNC('week', created_at)
+                    ORDER BY week_start DESC
+                """
+                performance_data = await database.fetch_all(
+                    performance_query, {"advertiser_id": advertiser_id}
+                )
+
+                performance_history = []
+                for i, week_data in enumerate(performance_data):
+                    total = int(week_data["total_bids"] or 0)
+                    won = int(week_data["won_bids"] or 0)
+                    success_rate = (won / total * 100) if total > 0 else 0
+                    performance_history.append(
+                        PerformanceHistory(
+                            name=f"Week {i+1}", score=int(round(success_rate, 1))
+                        )
+                    )
+
+                # 기본 성과 데이터가 없으면 기본값 제공
+                if not performance_history:
+                    performance_history = [
+                        PerformanceHistory(name="Week 1", score=65),
+                        PerformanceHistory(name="Week 2", score=70),
+                        PerformanceHistory(name="Week 3", score=72),
+                        PerformanceHistory(name="Week 4", score=75),
+                    ]
+
+                # 5. 추가 통계 데이터
+                additional_stats = {
+                    "autoBidEnabled": (
+                        auto_bid_settings["is_enabled"] if auto_bid_settings else False
+                    ),
+                    "dailyBudget": daily_budget,
+                    "todaySpent": today_spent,
+                    "budgetUsagePercent": round(budget_usage_percent, 1),
+                    "maxBidPerKeyword": (
+                        auto_bid_settings["max_bid_per_keyword"]
+                        if auto_bid_settings
+                        else 3000
+                    ),
+                    "minQualityScore": (
+                        auto_bid_settings["min_quality_score"]
+                        if auto_bid_settings
+                        else 50
+                    ),
+                    "remainingBudget": daily_budget - today_spent,
+                }
+
+                # 6. BiddingSummary 객체 생성
+                bidding_summary = BiddingSummary(
+                    totalBids=total_bids,
+                    successfulBids=successful_bids,
+                    totalSpent=total_spent,
+                    averageBidAmount=round(average_bid_amount, 2),
+                )
+
+            except Exception as e:
+                print(f"🔍 성과 이력 및 추가 통계 오류: {e}")
+                raise e
+
+        else:
+            # 심사 승인되지 않은 경우 기본값
+            total_bids = 0
+            successful_bids = 0
+            total_spent = 0
+            average_bid_amount = 0
+            recent_bids = []
+            performance_history = [
+                PerformanceHistory(name="Week 1", score=0),
+                PerformanceHistory(name="Week 2", score=0),
+                PerformanceHistory(name="Week 3", score=0),
+                PerformanceHistory(name="Week 4", score=0),
+            ]
+            additional_stats = {
+                "autoBidEnabled": False,
+                "dailyBudget": 0,
+                "todaySpent": 0,
+                "budgetUsagePercent": 0,
+                "maxBidPerKeyword": 0,
+                "minQualityScore": 0,
+                "remainingBudget": 0,
+            }
 
         bidding_summary = BiddingSummary(
             totalBids=total_bids,
@@ -698,15 +1317,17 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
             averageBidAmount=round(average_bid_amount, 2),
         )
 
+        print(f"Dashboard data for advertiser {advertiser_id}:")
+        print(f"  - Total bids: {total_bids}")
+        print(f"  - Successful bids: {successful_bids}")
+        print(f"  - Total spent: ₩{total_spent:,}")
+        print(f"  - Recent bids: {len(recent_bids)}")
+
         return DashboardResponse(
             biddingSummary=bidding_summary,
-            performanceHistory=[
-                PerformanceHistory(name="Week 1", score=65),
-                PerformanceHistory(name="Week 2", score=70),
-                PerformanceHistory(name="Week 3", score=72),
-                PerformanceHistory(name="Week 4", score=75),
-            ],
+            performanceHistory=performance_history,
             recentBids=recent_bids,
+            additionalStats=additional_stats,
         )
 
     except Exception as e:
@@ -1610,6 +2231,213 @@ async def _execute_bid_in_auction(
     except Exception as e:
         print(f"Error executing bid in auction: {e}")
         return "timeout"
+
+
+@app.get("/business-categories")
+async def get_business_categories():
+    """비즈니스 카테고리 목록 조회"""
+    try:
+        # 데이터베이스에서 카테고리 조회
+        categories = await database.fetch_all(
+            """
+            SELECT id, parent_id, name, path, level, is_active, sort_order, created_at
+            FROM business_categories 
+            WHERE is_active = true 
+            ORDER BY level, sort_order, name
+            """
+        )
+
+        if not categories:
+            # 기본 카테고리 데이터 반환
+            return [
+                {
+                    "id": 1,
+                    "parent_id": None,
+                    "name": "전자제품",
+                    "path": "electronics",
+                    "level": 1,
+                    "is_active": True,
+                    "sort_order": 1,
+                },
+                {
+                    "id": 2,
+                    "parent_id": None,
+                    "name": "의류",
+                    "path": "clothing",
+                    "level": 1,
+                    "is_active": True,
+                    "sort_order": 2,
+                },
+                {
+                    "id": 3,
+                    "parent_id": None,
+                    "name": "식품",
+                    "path": "food",
+                    "level": 1,
+                    "is_active": True,
+                    "sort_order": 3,
+                },
+                {
+                    "id": 4,
+                    "parent_id": None,
+                    "name": "가구",
+                    "path": "furniture",
+                    "level": 1,
+                    "is_active": True,
+                    "sort_order": 4,
+                },
+                {
+                    "id": 5,
+                    "parent_id": None,
+                    "name": "스포츠",
+                    "path": "sports",
+                    "level": 1,
+                    "is_active": True,
+                    "sort_order": 5,
+                },
+                {
+                    "id": 6,
+                    "parent_id": 1,
+                    "name": "스마트폰",
+                    "path": "electronics/smartphones",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 1,
+                },
+                {
+                    "id": 7,
+                    "parent_id": 1,
+                    "name": "노트북",
+                    "path": "electronics/laptops",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 2,
+                },
+                {
+                    "id": 8,
+                    "parent_id": 2,
+                    "name": "남성의류",
+                    "path": "clothing/mens",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 1,
+                },
+                {
+                    "id": 9,
+                    "parent_id": 2,
+                    "name": "여성의류",
+                    "path": "clothing/womens",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 2,
+                },
+                {
+                    "id": 10,
+                    "parent_id": 3,
+                    "name": "신선식품",
+                    "path": "food/fresh",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 1,
+                },
+                {
+                    "id": 11,
+                    "parent_id": 3,
+                    "name": "가공식품",
+                    "path": "food/processed",
+                    "level": 2,
+                    "is_active": True,
+                    "sort_order": 2,
+                },
+            ]
+
+        return categories
+
+    except Exception as e:
+        print(f"Error fetching business categories: {e}")
+        # 에러 시 기본 카테고리 반환
+        return [
+            {
+                "id": 1,
+                "parent_id": None,
+                "name": "전자제품",
+                "path": "electronics",
+                "level": 1,
+                "is_active": True,
+                "sort_order": 1,
+            },
+            {
+                "id": 2,
+                "parent_id": None,
+                "name": "의류",
+                "path": "clothing",
+                "level": 1,
+                "is_active": True,
+                "sort_order": 2,
+            },
+            {
+                "id": 3,
+                "parent_id": None,
+                "name": "식품",
+                "path": "food",
+                "level": 1,
+                "is_active": True,
+                "sort_order": 3,
+            },
+            {
+                "id": 4,
+                "parent_id": None,
+                "name": "가구",
+                "path": "furniture",
+                "level": 1,
+                "is_active": True,
+                "sort_order": 4,
+            },
+            {
+                "id": 5,
+                "parent_id": None,
+                "name": "스포츠",
+                "path": "sports",
+                "level": 1,
+                "is_active": True,
+                "sort_order": 5,
+            },
+        ]
+
+
+@app.delete("/admin/delete-advertiser/{advertiser_id}")
+async def delete_advertiser(advertiser_id: int):
+    """광고주 완전 삭제 (거절된 광고주만)"""
+    try:
+        # 광고주가 거절 상태인지 확인
+        review_status = await database.fetch_val(
+            "SELECT review_status FROM advertiser_reviews WHERE advertiser_id = :advertiser_id",
+            {"advertiser_id": advertiser_id},
+        )
+
+        if not review_status:
+            raise HTTPException(status_code=404, detail="Advertiser not found")
+
+        if review_status != "rejected":
+            raise HTTPException(
+                status_code=400, detail="Only rejected advertisers can be deleted"
+            )
+
+        # 트랜잭션으로 모든 관련 데이터 삭제
+        async with database.transaction():
+            # 관련 테이블에서 데이터 삭제 (CASCADE로 자동 삭제됨)
+            await database.execute(
+                "DELETE FROM advertisers WHERE id = :advertiser_id",
+                {"advertiser_id": advertiser_id},
+            )
+
+        return {"success": True, "message": "Advertiser deleted successfully"}
+
+    except Exception as e:
+        print(f"Error deleting advertiser: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete advertiser: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

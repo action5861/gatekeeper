@@ -27,19 +27,27 @@ export default function Header() {
   ]
 
   const handleLogout = () => {
+    if (typeof window === 'undefined') return
     localStorage.removeItem('token')
     localStorage.removeItem('userType')
     router.push('/login')
   }
 
   const handleSignIn = (userType: 'user' | 'advertiser') => {
+    if (typeof window === 'undefined') return
     setShowDropdown(false)
     // Store the selected user type in localStorage for the login page
     localStorage.setItem('selectedUserType', userType)
     router.push('/login')
   }
 
-  const isAuthenticated = typeof window !== 'undefined' && localStorage.getItem('token')
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setIsAuthenticated(!!localStorage.getItem('token'))
+    }
+  }, [])
 
   // Close dropdown when clicking outside
   useEffect(() => {

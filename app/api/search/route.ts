@@ -5,11 +5,21 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const ANALYSIS_SERVICE_URL = process.env.ANALYSIS_SERVICE_URL || 'http://analysis-service:8001';
 const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://auction-service:8002';
+const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://user-service:8005';
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { query } = body;
+
+    // 사용자 인증 확인
+    const authHeader = request.headers.get('authorization');
+    if (!authHeader) {
+      return NextResponse.json<ApiResponse<null>>({
+        success: false,
+        error: '인증이 필요합니다.'
+      }, { status: 401 });
+    }
 
     // 검색어 유효성 검사
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
@@ -49,6 +59,7 @@ export async function POST(request: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': authHeader, // 사용자 정보 전달
       },
       body: JSON.stringify({
         query: query.trim(),
@@ -65,6 +76,33 @@ export async function POST(request: NextRequest) {
 
     const auctionData = await auctionResponse.json();
     const auction = auctionData.data;
+
+    // 3단계: User Service에 검색 데이터 저장 및 통계 업데이트
+    try {
+      const userServiceResponse = await fetch(`${USER_SERVICE_URL}/search-completed`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authHeader,
+        },
+        body: JSON.stringify({
+          query: query.trim(),
+          quality_score: qualityReport.score,
+          commercial_value: qualityReport.commercialValue,
+          keywords: qualityReport.keywords,
+          suggestions: qualityReport.suggestions,
+          auction_id: auction.searchId
+        }),
+      });
+
+      if (userServiceResponse.ok) {
+        console.log('✅ Search data saved to user service');
+      } else {
+        console.warn('⚠️ Failed to save search data to user service');
+      }
+    } catch (error) {
+      console.warn('⚠️ User service error (non-critical):', error);
+    }
 
     // 성공 응답
     return NextResponse.json<ApiResponse<{ auction: any; qualityReport: any }>>({
@@ -93,7 +131,7 @@ export async function OPTIONS() {
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     },
   });
 } 

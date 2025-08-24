@@ -1,9 +1,11 @@
 'use client'
 
 import AdvertiserReviewCard from '@/components/admin/AdvertiserReviewCard'
+import ApprovedAdvertiserCard from '@/components/admin/ApprovedAdvertiserCard'
+import RejectedAdvertiserCard from '@/components/admin/RejectedAdvertiserCard'
 import { AlertCircle, CheckCircle, RefreshCw, Shield, XCircle } from 'lucide-react'
 import { useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 interface AdvertiserReviewData {
     id: number
@@ -23,19 +25,76 @@ interface AdvertiserReviewData {
 
 export default function AdminAdvertiserReviewPage() {
     const [advertisers, setAdvertisers] = useState<AdvertiserReviewData[]>([])
+    const [rejectedAdvertisers, setRejectedAdvertisers] = useState<AdvertiserReviewData[]>([])
+    const [approvedAdvertisers, setApprovedAdvertisers] = useState<AdvertiserReviewData[]>([])
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [isRefreshing, setIsRefreshing] = useState(false)
+    const [activeTab, setActiveTab] = useState<'pending' | 'rejected' | 'approved'>('pending')
     const router = useRouter()
 
-    const fetchPendingReviews = async () => {
+    // 토큰 확인 및 리다이렉트 함수
+    const checkTokenAndRedirect = useCallback(() => {
+        if (typeof window === 'undefined') return null
+        const token = localStorage.getItem('adminToken')
+        if (!token) {
+            router.push('/admin/login')
+            return null
+        }
+        return token
+    }, [router])
+
+    // 승인된 광고주 조회 함수 개선
+    const fetchApprovedAdvertisers = useCallback(async () => {
+        console.log('=== fetchApprovedAdvertisers 시작 ===')
+
+        const token = checkTokenAndRedirect()
+        if (!token) return
+
         try {
-            const token = localStorage.getItem('adminToken')
-            if (!token) {
-                router.push('/admin/login')
-                return
+            console.log('API 요청 전송 중...')
+            const response = await fetch('/api/admin/advertiser-review?status=approved', {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                },
+            })
+
+            console.log('응답 상태:', response.status)
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    localStorage.removeItem('adminToken')
+                    router.push('/admin/login')
+                    return
+                }
+                throw new Error(`HTTP ${response.status}: Failed to fetch approved advertisers`)
             }
 
+            const data = await response.json()
+            console.log('받은 데이터:', data)
+            console.log('광고주 개수:', data.advertisers?.length || 0)
+
+            // 상태 업데이트를 즉시 실행
+            const approvedData = Array.isArray(data.advertisers) ? data.advertisers : []
+            console.log('설정할 데이터:', approvedData)
+
+            setApprovedAdvertisers(approvedData)
+
+            // 상태 업데이트 확인을 위한 즉시 로그
+            console.log('상태 업데이트 완료, 개수:', approvedData.length)
+
+        } catch (err) {
+            console.error('fetchApprovedAdvertisers 에러:', err)
+            setError(err instanceof Error ? err.message : 'An error occurred')
+        }
+    }, [checkTokenAndRedirect, router])
+
+    // 대기 중인 심사 조회
+    const fetchPendingReviews = useCallback(async () => {
+        const token = checkTokenAndRedirect()
+        if (!token) return
+
+        try {
             const response = await fetch('/api/admin/advertiser-review', {
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -52,15 +111,71 @@ export default function AdminAdvertiserReviewPage() {
             }
 
             const data = await response.json()
-            setAdvertisers(data.advertisers || [])
+            setAdvertisers(Array.isArray(data.advertisers) ? data.advertisers : [])
         } catch (err) {
             setError(err instanceof Error ? err.message : 'An error occurred')
+        }
+    }, [checkTokenAndRedirect, router])
+
+    // 거절된 광고주 조회
+    const fetchRejectedAdvertisers = useCallback(async () => {
+        const token = checkTokenAndRedirect()
+        if (!token) return
+
+        try {
+            const response = await fetch('/api/admin/advertiser-review?status=rejected', {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                },
+            })
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    localStorage.removeItem('adminToken')
+                    router.push('/admin/login')
+                    return
+                }
+                throw new Error('Failed to fetch rejected advertisers')
+            }
+
+            const data = await response.json()
+            setRejectedAdvertisers(Array.isArray(data.advertisers) ? data.advertisers : [])
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'An error occurred')
+        }
+    }, [checkTokenAndRedirect, router])
+
+    // 모든 데이터 로드
+    const loadAllData = useCallback(async () => {
+        setIsLoading(true)
+        setError(null)
+
+        try {
+            await Promise.all([
+                fetchPendingReviews(),
+                fetchRejectedAdvertisers(),
+                fetchApprovedAdvertisers()
+            ])
+        } catch (err) {
+            console.error('데이터 로드 에러:', err)
         } finally {
             setIsLoading(false)
             setIsRefreshing(false)
         }
-    }
+    }, [fetchPendingReviews, fetchRejectedAdvertisers, fetchApprovedAdvertisers])
 
+    // 탭별 데이터 로드
+    const loadTabData = useCallback(async () => {
+        if (activeTab === 'pending') {
+            await fetchPendingReviews()
+        } else if (activeTab === 'rejected') {
+            await fetchRejectedAdvertisers()
+        } else if (activeTab === 'approved') {
+            await fetchApprovedAdvertisers()
+        }
+    }, [activeTab, fetchPendingReviews, fetchRejectedAdvertisers, fetchApprovedAdvertisers])
+
+    // 심사 업데이트 처리
     const handleReviewUpdate = async (
         advertiserId: number,
         status: 'approved' | 'rejected',
@@ -68,6 +183,7 @@ export default function AdminAdvertiserReviewPage() {
         bidRange: { min: number; max: number }
     ) => {
         try {
+            if (typeof window === 'undefined') return
             const token = localStorage.getItem('adminToken')
             if (!token) return
 
@@ -90,10 +206,16 @@ export default function AdminAdvertiserReviewPage() {
                 throw new Error('Failed to update review')
             }
 
-            // 성공 시 목록에서 제거
+            // 성공 시 목록에서 제거하고 전체 데이터 다시 로드
             setAdvertisers(prev => prev.filter(adv => adv.advertiser_id !== advertiserId))
 
-            // 성공 메시지
+            // 승인/거절 상태에 따라 해당 목록 새로고침
+            if (status === 'approved') {
+                await fetchApprovedAdvertisers()
+            } else {
+                await fetchRejectedAdvertisers()
+            }
+
             alert(`광고주 심사가 ${status === 'approved' ? '승인' : '거절'}되었습니다.`)
 
         } catch (error) {
@@ -102,12 +224,14 @@ export default function AdminAdvertiserReviewPage() {
         }
     }
 
+    // 광고주 데이터 업데이트
     const handleDataUpdate = async (
         advertiserId: number,
         keywords: string[],
         categories: number[]
     ) => {
         try {
+            if (typeof window === 'undefined') return
             const token = localStorage.getItem('adminToken')
             if (!token) return
 
@@ -143,14 +267,65 @@ export default function AdminAdvertiserReviewPage() {
         }
     }
 
-    const handleRefresh = () => {
-        setIsRefreshing(true)
-        fetchPendingReviews()
+    // 광고주 삭제
+    const handleDeleteAdvertiser = async (advertiserId: number) => {
+        if (typeof window === 'undefined') return
+        if (!confirm('정말로 이 광고주를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.')) {
+            return
+        }
+
+        try {
+            const token = localStorage.getItem('adminToken')
+            if (!token) return
+
+            const response = await fetch(`/api/admin/advertiser-review/${advertiserId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                },
+            })
+
+            if (!response.ok) {
+                throw new Error('Failed to delete advertiser')
+            }
+
+            // 성공 시 목록에서 제거
+            setRejectedAdvertisers(prev => prev.filter(adv => adv.advertiser_id !== advertiserId))
+            alert('광고주가 삭제되었습니다.')
+
+        } catch (error) {
+            console.error('Delete failed:', error)
+            alert('삭제에 실패했습니다.')
+        }
     }
 
+    // 새로고침 처리
+    const handleRefresh = () => {
+        setIsRefreshing(true)
+        loadTabData()
+    }
+
+    // 초기 데이터 로드
     useEffect(() => {
-        fetchPendingReviews()
-    }, [])
+        if (typeof window === 'undefined') return
+        console.log('=== 컴포넌트 마운트, 초기 데이터 로드 ===')
+        loadAllData()
+    }, []) // 빈 의존성 배열로 한 번만 실행
+
+    // 탭 변경 시 데이터 로드
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        console.log('=== 탭 변경됨:', activeTab, '===')
+        loadTabData()
+    }, [activeTab, loadTabData])
+
+    // 상태 변경 감지를 위한 디버깅 useEffect
+    useEffect(() => {
+        if (typeof window === 'undefined') return
+        console.log('=== 승인된 광고주 상태 변경 감지 ===')
+        console.log('현재 승인된 광고주 수:', approvedAdvertisers.length)
+        console.log('승인된 광고주 목록:', approvedAdvertisers)
+    }, [approvedAdvertisers])
 
     if (isLoading) {
         return (
@@ -207,7 +382,7 @@ export default function AdminAdvertiserReviewPage() {
                 )}
 
                 {/* Stats */}
-                <div className="mb-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="mb-8 grid grid-cols-1 md:grid-cols-4 gap-6">
                     <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
                         <div className="flex items-center space-x-3">
                             <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center">
@@ -229,7 +404,7 @@ export default function AdminAdvertiserReviewPage() {
                             </div>
                             <div>
                                 <p className="text-2xl font-bold text-slate-100">
-                                    {advertisers.filter(adv => adv.review_status === 'approved').length}
+                                    {approvedAdvertisers.length}
                                 </p>
                                 <p className="text-sm text-slate-400">승인됨</p>
                             </div>
@@ -243,40 +418,141 @@ export default function AdminAdvertiserReviewPage() {
                             </div>
                             <div>
                                 <p className="text-2xl font-bold text-slate-100">
-                                    {advertisers.filter(adv => adv.review_status === 'rejected').length}
+                                    {rejectedAdvertisers.length}
                                 </p>
                                 <p className="text-sm text-slate-400">거절됨</p>
                             </div>
                         </div>
                     </div>
+
+                    <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
+                        <div className="flex items-center space-x-3">
+                            <div className="w-10 h-10 bg-slate-500/20 rounded-lg flex items-center justify-center">
+                                <Shield className="w-5 h-5 text-slate-400" />
+                            </div>
+                            <div>
+                                <p className="text-2xl font-bold text-slate-100">
+                                    {advertisers.length + approvedAdvertisers.length + rejectedAdvertisers.length}
+                                </p>
+                                <p className="text-sm text-slate-400">전체</p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
-                {/* Advertisers List */}
-                {advertisers.length === 0 ? (
-                    <div className="text-center py-12">
-                        <div className="w-16 h-16 bg-slate-700/50 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <CheckCircle className="w-8 h-8 text-slate-400" />
+                {/* Tabs */}
+                <div className="mb-6">
+                    <div className="border-b border-slate-700">
+                        <nav className="-mb-px flex space-x-8">
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('pending')}
+                                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'pending'
+                                    ? 'border-blue-500 text-blue-400'
+                                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-300'
+                                    }`}
+                            >
+                                심사 대기 ({advertisers.length})
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('approved')}
+                                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'approved'
+                                    ? 'border-green-500 text-green-400'
+                                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-300'
+                                    }`}
+                            >
+                                승인됨 ({approvedAdvertisers.length})
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('rejected')}
+                                className={`py-2 px-1 border-b-2 font-medium text-sm ${activeTab === 'rejected'
+                                    ? 'border-red-500 text-red-400'
+                                    : 'border-transparent text-slate-400 hover:text-slate-300 hover:border-slate-300'
+                                    }`}
+                            >
+                                거절됨 ({rejectedAdvertisers.length})
+                            </button>
+                        </nav>
+                    </div>
+                </div>
+
+                {/* Advertiser Cards */}
+                {activeTab === 'pending' ? (
+                    advertisers.length === 0 ? (
+                        <div className="text-center py-12">
+                            <div className="w-16 h-16 bg-slate-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <CheckCircle className="w-8 h-8 text-green-400" />
+                            </div>
+                            <h3 className="text-lg font-medium text-slate-100 mb-2">
+                                심사 대기 중인 광고주가 없습니다
+                            </h3>
+                            <p className="text-slate-400">
+                                모든 광고주 심사가 완료되었습니다.
+                            </p>
                         </div>
-                        <h3 className="text-lg font-medium text-slate-300 mb-2">
-                            심사 대기 중인 광고주가 없습니다
-                        </h3>
-                        <p className="text-slate-400">
-                            모든 광고주 심사가 완료되었습니다.
-                        </p>
-                    </div>
+                    ) : (
+                        <div className="space-y-6">
+                            {advertisers.map((advertiser) => (
+                                <AdvertiserReviewCard
+                                    key={advertiser.advertiser_id}
+                                    advertiser={advertiser}
+                                    onReviewUpdate={handleReviewUpdate}
+                                    onDataUpdate={handleDataUpdate}
+                                />
+                            ))}
+                        </div>
+                    )
+                ) : activeTab === 'approved' ? (
+                    approvedAdvertisers.length === 0 ? (
+                        <div className="text-center py-12">
+                            <div className="w-16 h-16 bg-slate-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <CheckCircle className="w-8 h-8 text-green-400" />
+                            </div>
+                            <h3 className="text-lg font-medium text-slate-100 mb-2">
+                                승인된 광고주가 없습니다
+                            </h3>
+                            <p className="text-slate-400">
+                                아직 승인된 광고주가 없습니다.
+                            </p>
+                        </div>
+                    ) : (
+                        <div className="space-y-6">
+                            {approvedAdvertisers.map((advertiser) => (
+                                <ApprovedAdvertiserCard
+                                    key={advertiser.advertiser_id}
+                                    advertiser={advertiser}
+                                />
+                            ))}
+                        </div>
+                    )
                 ) : (
-                    <div className="space-y-6">
-                        {advertisers.map((advertiser) => (
-                            <AdvertiserReviewCard
-                                key={advertiser.id}
-                                advertiser={advertiser}
-                                onReviewUpdate={handleReviewUpdate}
-                                onDataUpdate={handleDataUpdate}
-                            />
-                        ))}
-                    </div>
+                    rejectedAdvertisers.length === 0 ? (
+                        <div className="text-center py-12">
+                            <div className="w-16 h-16 bg-slate-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <CheckCircle className="w-8 h-8 text-green-400" />
+                            </div>
+                            <h3 className="text-lg font-medium text-slate-100 mb-2">
+                                거절된 광고주가 없습니다
+                            </h3>
+                            <p className="text-slate-400">
+                                모든 광고주가 승인되었거나 아직 거절된 광고주가 없습니다.
+                            </p>
+                        </div>
+                    ) : (
+                        <div className="space-y-6">
+                            {rejectedAdvertisers.map((advertiser) => (
+                                <RejectedAdvertiserCard
+                                    key={advertiser.advertiser_id}
+                                    advertiser={advertiser}
+                                    onDelete={handleDeleteAdvertiser}
+                                />
+                            ))}
+                        </div>
+                    )
                 )}
             </div>
         </div>
     )
-} 
+}

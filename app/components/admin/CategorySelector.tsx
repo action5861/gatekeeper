@@ -41,31 +41,51 @@ export default function CategorySelector({
             const response = await fetch('/api/business-categories')
             if (response.ok) {
                 const data = await response.json()
-                setCategoryTree(buildCategoryTree(data))
+                console.log('API 응답 데이터:', data)
+
+                // 이 엔드포인트는 플랫 배열을 반환함
+                const flat = data?.categories ?? data
+                if (Array.isArray(flat)) {
+                    setCategoryTree(buildCategoryTree(flat))
+                } else {
+                    console.error('Unexpected API response format:', data)
+                    setCategoryTree([])
+                }
             }
         } catch (error) {
             console.error('Failed to load categories:', error)
+            setCategoryTree([])
         } finally {
             setIsLoading(false)
         }
     }
 
     const buildCategoryTree = (flatCategories: any[]): Category[] => {
+        // flatCategories가 배열이 아니거나 비어있으면 빈 배열 반환
+        if (!Array.isArray(flatCategories) || flatCategories.length === 0) {
+            console.warn('flatCategories is not an array or is empty:', flatCategories)
+            return []
+        }
+
         const categoryMap = new Map<number, Category>()
         const rootCategories: Category[] = []
 
         flatCategories.forEach(cat => {
-            categoryMap.set(cat.id, { ...cat, children: [] })
+            if (cat && cat.id) {
+                categoryMap.set(cat.id, { ...cat, children: [] })
+            }
         })
 
         flatCategories.forEach(cat => {
-            if (cat.parent_id) {
-                const parent = categoryMap.get(cat.parent_id)
-                if (parent) {
-                    parent.children!.push(categoryMap.get(cat.id)!)
+            if (cat && cat.id) {
+                if (cat.parent_id) {
+                    const parent = categoryMap.get(cat.parent_id)
+                    if (parent) {
+                        parent.children!.push(categoryMap.get(cat.id)!)
+                    }
+                } else {
+                    rootCategories.push(categoryMap.get(cat.id)!)
                 }
-            } else {
-                rootCategories.push(categoryMap.get(cat.id)!)
             }
         })
 
@@ -90,10 +110,15 @@ export default function CategorySelector({
         setSelectedCategories(prev => {
             if (prev.includes(categoryId)) {
                 return prev.filter(id => id !== categoryId)
-            } else if (prev.length < maxCategories) {
-                return [...prev, categoryId]
             }
-            return prev
+            // 최대 개수 제한: 초과 시 마지막 항목을 제거하고 새 항목 추가
+            if (prev.length >= maxCategories) {
+                const next = [...prev]
+                next.pop()
+                next.push(categoryId)
+                return next
+            }
+            return [...prev, categoryId]
         })
     }
 
@@ -108,7 +133,8 @@ export default function CategorySelector({
             }
             return null
         }
-        return findCategory(categoryTree)?.name || ''
+        const found = findCategory(categoryTree)
+        return found?.name || `ID ${categoryId}`
     }
 
     const saveChanges = () => {
@@ -143,8 +169,8 @@ export default function CategorySelector({
                         onClick={() => selectCategory(category.id)}
                         disabled={!isEditing}
                         className={`flex items-center space-x-2 px-2 py-1 rounded text-sm transition-colors ${selectedCategories.includes(category.id)
-                                ? 'bg-blue-500 text-white'
-                                : 'text-slate-300 hover:bg-slate-700'
+                            ? 'bg-blue-500 text-white'
+                            : 'text-slate-300 hover:bg-slate-700'
                             } ${!isEditing ? 'cursor-default' : ''}`}
                     >
                         {selectedCategories.includes(category.id) && (

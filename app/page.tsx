@@ -35,10 +35,12 @@ export default function Home() {
     setIsEvaluating(true)
     const timer = setTimeout(async () => {
       try {
+        const token = localStorage.getItem('token')
         const response = await fetch('/api/search', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            ...(token && { 'Authorization': `Bearer ${token}` }),
           },
           body: JSON.stringify({ query: query.trim() }),
         })
@@ -74,10 +76,12 @@ export default function Home() {
     setSelectedBid(null) // 선택된 입찰 초기화
 
     try {
+      const token = localStorage.getItem('token')
       const response = await fetch('/api/search', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(token && { 'Authorization': `Bearer ${token}` }),
         },
         body: JSON.stringify({ query: searchQuery }),
       })
@@ -88,6 +92,28 @@ export default function Home() {
         setQualityReport(data.data.qualityReport)
         setAuction(data.data.auction)
         showNotification('success', 'Reverse auction started successfully!')
+
+        // 일일 제출 카운트 업데이트
+        if (token && data.data.qualityReport) {
+          try {
+            await fetch('/api/user/update-daily-submission', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                quality_score: data.data.qualityReport.score
+              }),
+            })
+          } catch (error) {
+            console.error('Failed to update daily submission count:', error)
+          }
+        }
+
+        // 대시보드 데이터 갱신 이벤트 발생
+        window.dispatchEvent(new CustomEvent('stats-updated'))
+        window.dispatchEvent(new CustomEvent('submission-updated'))
       } else {
         console.error('Search failed:', data.error)
         showNotification('error', data.error || 'Failed to start auction')
@@ -108,11 +134,14 @@ export default function Home() {
 
     setIsLoading(true)
     try {
+      const token = localStorage.getItem('token')
+
       // 1. 입찰 선택 처리
       const auctionResponse = await fetch('/api/auction/select', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(token && { 'Authorization': `Bearer ${token}` }),
         },
         body: JSON.stringify({
           searchId: auction.searchId,
@@ -134,7 +163,6 @@ export default function Home() {
           buyerName: selectedBid?.buyerName
         });
 
-        const token = localStorage.getItem('token')
         const rewardResponse = await fetch('/api/reward', {
           method: 'POST',
           headers: {
@@ -156,6 +184,7 @@ export default function Home() {
 
           // 대시보드 업데이트 이벤트 발생
           window.dispatchEvent(new CustomEvent('reward-updated'))
+          window.dispatchEvent(new CustomEvent('stats-updated'))
         } else {
           showNotification('error', '보상 지급에 실패했습니다.')
         }
@@ -178,8 +207,8 @@ export default function Home() {
       {/* Notification */}
       {notification && (
         <div className={`fixed top-20 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg transition-all duration-300 ${notification.type === 'success'
-            ? 'bg-green-600 text-white'
-            : 'bg-red-600 text-white'
+          ? 'bg-green-600 text-white'
+          : 'bg-red-600 text-white'
           }`}>
           {notification.message}
         </div>

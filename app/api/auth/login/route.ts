@@ -14,8 +14,8 @@ export async function POST(request: NextRequest) {
         }
 
         const serviceUrl = userType === 'advertiser'
-            ? process.env.ADVERTISER_SERVICE_URL || 'http://advertiser-service:8007'
-            : process.env.USER_SERVICE_URL || 'http://user-service:8005'
+            ? process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
+            : process.env.USER_SERVICE_URL || 'http://localhost:8005'
 
         console.log(`Attempting login for ${userType} at ${serviceUrl}`)
 

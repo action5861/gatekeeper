@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, validator, Field
 from typing import List, Literal, Optional
 import os
+import re
+import html
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -14,6 +16,7 @@ from database import (
     connect_to_database,
     disconnect_from_database,
 )
+import json
 
 app = FastAPI(title="User Service", version="1.0.0")
 
@@ -40,23 +43,107 @@ app.add_middleware(
 )
 
 # 보안 설정
-SECRET_KEY = "a_very_secret_key_for_jwt"
+SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production"
+)
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 
+# 입력값 검증 함수들
+def sanitize_input(value: str) -> str:
+    """XSS 방지를 위한 입력값 이스케이핑"""
+    if not isinstance(value, str):
+        return str(value)
+    return html.escape(value.strip())
+
+
+def validate_password_strength(password: str) -> bool:
+    """비밀번호 강도 검증"""
+    if len(password) < 8:
+        return False
+    if not re.search(r"[A-Z]", password):
+        return False
+    if not re.search(r"[a-z]", password):
+        return False
+    if not re.search(r"\d", password):
+        return False
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        return False
+    return True
+
+
+def validate_sql_injection(value: str) -> bool:
+    """SQL Injection 방지를 위한 검증"""
+    sql_patterns = [
+        r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|SCRIPT)\b)",
+        r"(\b(OR|AND)\b\s+\d+\s*=\s*\d+)",
+        r"(\b(OR|AND)\b\s+['\"]?\w+['\"]?\s*=\s*['\"]?\w+['\"]?)",
+        r"(--|#|/\*|\*/)",
+        r"(\b(WAITFOR|DELAY)\b)",
+        r"(\b(BENCHMARK|SLEEP)\b)",
+    ]
+
+    value_upper = value.upper()
+    for pattern in sql_patterns:
+        if re.search(pattern, value_upper, re.IGNORECASE):
+            return False
+    return True
+
+
 # Pydantic 모델들
 class UserCreate(BaseModel):
-    username: str
-    email: str
-    password: str
+    username: str = Field(..., min_length=3, max_length=50, description="사용자명")
+    email: EmailStr = Field(..., description="이메일 주소")
+    password: str = Field(..., min_length=8, max_length=128, description="비밀번호")
+
+    @validator("username")
+    def validate_username(cls, v):
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_가-힣]+$", v):
+            raise ValueError(
+                "사용자명은 영문, 숫자, 언더스코어, 한글만 사용 가능합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("사용자명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("email")
+    def validate_email(cls, v):
+        v = sanitize_input(v.lower())
+        if not validate_sql_injection(v):
+            raise ValueError("이메일에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        if not validate_password_strength(v):
+            raise ValueError(
+                "비밀번호는 최소 8자 이상이며, 대문자, 소문자, 숫자, 특수문자를 포함해야 합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("비밀번호에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class UserLogin(BaseModel):
-    email: str
-    password: str
+    email: EmailStr = Field(..., description="이메일 주소")
+    password: str = Field(..., description="비밀번호")
+
+    @validator("email")
+    def validate_email(cls, v):
+        v = sanitize_input(v.lower())
+        if not validate_sql_injection(v):
+            raise ValueError("이메일에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        if not validate_sql_injection(v):
+            raise ValueError("비밀번호에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class Token(BaseModel):
@@ -65,13 +152,28 @@ class Token(BaseModel):
 
 
 class QualityHistory(BaseModel):
-    name: str
-    score: int
+    name: str = Field(..., max_length=100)
+    score: int = Field(..., ge=0, le=100)
+
+    @validator("name")
+    def validate_name(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("이름에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class SubmissionLimit(BaseModel):
-    level: Literal["Excellent", "Good", "Average", "Needs Improvement"]
-    dailyMax: int
+    level: Literal[
+        "Excellent",
+        "Very Good",
+        "Good",
+        "Average",
+        "Below Average",
+        "Poor",
+        "Very Poor",
+    ]
+    dailyMax: int = Field(..., ge=0, le=1000)
 
 
 class DashboardResponse(BaseModel):
@@ -85,16 +187,72 @@ class DashboardResponse(BaseModel):
 
 
 class EarningsRequest(BaseModel):
-    amount: int
+    amount: int = Field(..., ge=0, le=1000000)
 
 
 class QualityScoreRequest(BaseModel):
-    score: int
-    week_label: str
+    score: int = Field(..., ge=0, le=100)
+    week_label: str = Field(..., max_length=50)
+
+    @validator("week_label")
+    def validate_week_label(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("주차 라벨에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class SubmissionRequest(BaseModel):
-    quality_score: int
+    quality_score: int = Field(..., ge=0, le=100)
+
+
+class SearchCompletedRequest(BaseModel):
+    query: str = Field(..., max_length=500)
+    quality_score: int = Field(..., ge=0, le=100)
+    commercial_value: str = Field(..., max_length=100)
+    keywords: dict
+    suggestions: dict
+    auction_id: str = Field(..., max_length=100)
+
+    @validator("query")
+    def validate_query(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("검색어에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("commercial_value")
+    def validate_commercial_value(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("상업적 가치에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("auction_id")
+    def validate_auction_id(cls, v):
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError(
+                "경매 ID는 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("경매 ID에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+
+class AuctionCompletedRequest(BaseModel):
+    search_id: str = Field(..., max_length=100)
+    selected_bid_id: str = Field(..., max_length=100)
+    reward_amount: int = Field(..., ge=0, le=1000000)
+
+    @validator("search_id", "selected_bid_id")
+    def validate_id(cls, v):
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError("ID는 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다")
+        if not validate_sql_injection(v):
+            raise ValueError("ID에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 # 🔐 보안 함수들
@@ -118,17 +276,30 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 
 def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    base_limit = 20
-    if quality_score >= 90:
-        return SubmissionLimit(level="Excellent", dailyMax=base_limit * 2)
+    """품질 점수에 따른 동적 제출 한도를 계산합니다."""
+    base_limit = 5  # 기본 일일 한도를 5개로 변경
+
+    if quality_score >= 95:
+        # 'Excellent' 등급: 300% (15개)
+        return SubmissionLimit(level="Excellent", dailyMax=base_limit * 3)
+    elif quality_score >= 90:
+        # 'Very Good' 등급: 200% (10개)
+        return SubmissionLimit(level="Very Good", dailyMax=base_limit * 2)
+    elif quality_score >= 80:
+        # 'Good' 등급: 160% (8개)
+        return SubmissionLimit(level="Good", dailyMax=int(base_limit * 1.6))
     elif quality_score >= 70:
-        return SubmissionLimit(level="Good", dailyMax=base_limit)
+        # 'Average' 등급: 120% (6개)
+        return SubmissionLimit(level="Average", dailyMax=int(base_limit * 1.2))
     elif quality_score >= 50:
-        return SubmissionLimit(level="Average", dailyMax=int(base_limit * 0.7))
+        # 'Below Average' 등급: 100% (5개)
+        return SubmissionLimit(level="Below Average", dailyMax=base_limit)
+    elif quality_score >= 30:
+        # 'Poor' 등급: 60% (3개)
+        return SubmissionLimit(level="Poor", dailyMax=int(base_limit * 0.6))
     else:
-        return SubmissionLimit(
-            level="Needs Improvement", dailyMax=int(base_limit * 0.3)
-        )
+        # 'Very Poor' 등급: 40% (2개)
+        return SubmissionLimit(level="Very Poor", dailyMax=int(base_limit * 0.4))
 
 
 # JWT 인증 함수
@@ -163,27 +334,37 @@ async def get_current_user(
 async def register_user(user: UserCreate):
     """신규 사용자 등록"""
     try:
+        print(
+            f"📝 Registration attempt for email: {user.email}, username: {user.username}"
+        )
+
         # 이메일 중복 확인
+        print("🔍 Checking email duplication...")
         existing_user = await database.fetch_one(
             "SELECT id FROM users WHERE email = :email", {"email": user.email}
         )
         if existing_user:
+            print(f"❌ Email already exists: {user.email}")
             raise HTTPException(status_code=400, detail="이미 등록된 이메일입니다.")
 
         # 사용자명 중복 확인
+        print("🔍 Checking username duplication...")
         existing_username = await database.fetch_one(
             "SELECT id FROM users WHERE username = :username",
             {"username": user.username},
         )
         if existing_username:
+            print(f"❌ Username already exists: {user.username}")
             raise HTTPException(
                 status_code=400, detail="이미 사용 중인 사용자명입니다."
             )
 
         # 비밀번호 해싱
+        print("🔐 Hashing password...")
         hashed_password = get_password_hash(user.password)
 
         # 사용자 생성
+        print("💾 Creating user in database...")
         query = """
         INSERT INTO users (username, email, hashed_password) 
         VALUES (:username, :email, :hashed_password)
@@ -197,9 +378,15 @@ async def register_user(user: UserCreate):
             },
         )
 
+        print(f"✅ Registration successful for: {user.email}")
         return {"message": "회원가입이 성공적으로 완료되었습니다."}
 
     except Exception as e:
+        print(f"💥 Registration error: {str(e)}")
+        print(f"💥 Error type: {type(e)}")
+        import traceback
+
+        print(f"💥 Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"등록 실패: {str(e)}")
 
 
@@ -640,20 +827,176 @@ async def update_quality_score(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/submission")
+@app.post("/update-daily-submission")
 async def update_daily_submission(
     request: SubmissionRequest, current_user: dict = Depends(get_current_user)
 ):
-    """일일 제출 현황 업데이트"""
+    """일일 제출 카운트를 업데이트합니다."""
     try:
         user_id = current_user["id"]
         quality_score = request.quality_score
 
         print(
-            f"📝 Updating daily submission for user {user_id}: quality_score={quality_score}"
+            f"📝 Updating daily submission for user {user_id} with quality score {quality_score}"
         )
 
-        # 1. 일일 제출 현황 업데이트 (INSERT 또는 UPDATE)
+        # 1. 오늘 날짜의 일일 제출 기록 확인
+        today = datetime.now().date()
+
+        existing_record = await database.fetch_one(
+            """
+            SELECT submission_count, quality_score_avg
+            FROM daily_submissions 
+            WHERE user_id = :user_id AND submission_date = :today
+            """,
+            {"user_id": user_id, "today": today},
+        )
+
+        if existing_record:
+            # 기존 기록이 있으면 카운트 증가 및 평균 품질 점수 업데이트
+            current_count = existing_record["submission_count"] or 0
+            current_avg = existing_record["quality_score_avg"] or 0
+
+            new_count = current_count + 1
+            # 새로운 평균 계산: (기존 평균 * 기존 개수 + 새로운 점수) / 새로운 개수
+            new_avg = round(
+                ((current_avg * current_count) + quality_score) / new_count, 1
+            )
+
+            await database.execute(
+                """
+                UPDATE daily_submissions 
+                SET submission_count = :new_count, 
+                    quality_score_avg = :new_avg,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = :user_id AND submission_date = :today
+                """,
+                {
+                    "user_id": user_id,
+                    "today": today,
+                    "new_count": new_count,
+                    "new_avg": new_avg,
+                },
+            )
+        else:
+            # 새로운 기록 생성
+            await database.execute(
+                """
+                INSERT INTO daily_submissions (
+                    user_id, submission_date, submission_count, 
+                    quality_score_avg, created_at, updated_at
+                )
+                VALUES (
+                    :user_id, :today, 1, :quality_score, 
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """,
+                {
+                    "user_id": user_id,
+                    "today": today,
+                    "quality_score": quality_score,
+                },
+            )
+
+        # 2. 동적 제출 한도 계산
+        submission_limit = calculate_dynamic_limit(quality_score)
+
+        # 3. 업데이트된 일일 제출 정보 조회
+        updated_record = await database.fetch_one(
+            """
+            SELECT submission_count, quality_score_avg
+            FROM daily_submissions 
+            WHERE user_id = :user_id AND submission_date = :today
+            """,
+            {"user_id": user_id, "today": today},
+        )
+
+        # updated_record가 None인 경우 기본값 설정
+        if updated_record is None:
+            updated_record = {"submission_count": 0, "quality_score_avg": quality_score}
+
+        daily_submission = {
+            "count": int(updated_record["submission_count"] or 0),
+            "limit": submission_limit.dailyMax,
+            "remaining": max(
+                0,
+                submission_limit.dailyMax
+                - int(updated_record["submission_count"] or 0),
+            ),
+            "qualityScoreAvg": float(
+                updated_record["quality_score_avg"] or quality_score
+            ),
+        }
+
+        print(f"✅ Daily submission updated for user {user_id}: {daily_submission}")
+
+        return {
+            "success": True,
+            "message": "일일 제출 카운트가 업데이트되었습니다.",
+            "dailySubmission": daily_submission,
+            "submissionLimit": submission_limit,
+        }
+
+    except Exception as e:
+        print(f"❌ Update daily submission error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search-completed")
+async def search_completed(
+    request: SearchCompletedRequest, current_user: dict = Depends(get_current_user)
+):
+    """검색 완료 시 데이터 저장 및 통계 업데이트"""
+    try:
+        user_id = current_user["id"]
+
+        print(f"🔍 Search completed for user {user_id}")
+        print(f"   Received data: {request}")
+        print(f"   Query: {request.query}")
+        print(f"   Quality score: {request.quality_score}")
+        print(f"   Commercial value: {request.commercial_value}")
+        print(f"   Auction ID: {request.auction_id}")
+        print(f"   Keywords: {request.keywords}")
+        print(f"   Suggestions: {request.suggestions}")
+
+        # 1. search_queries 테이블에 검색 데이터 저장
+        await database.execute(
+            """
+            INSERT INTO search_queries (user_id, query_text, quality_score, commercial_value, keywords, suggestions)
+            VALUES (:user_id, :query, :quality_score, :commercial_value, :keywords, :suggestions)
+            """,
+            {
+                "user_id": user_id,
+                "query": request.query,
+                "quality_score": request.quality_score,
+                "commercial_value": request.commercial_value,
+                "keywords": json.dumps(request.keywords),
+                "suggestions": json.dumps(request.suggestions),
+            },
+        )
+
+        # 2. 품질 이력에 저장 (주차별)
+        from datetime import datetime
+
+        current_week = f"Week {datetime.now().isocalendar()[1]}"
+
+        await database.execute(
+            """
+            INSERT INTO user_quality_history (user_id, week_label, quality_score, recorded_at)
+            VALUES (:user_id, :week_label, :quality_score, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id, week_label) 
+            DO UPDATE SET 
+                quality_score = :quality_score,
+                recorded_at = CURRENT_TIMESTAMP
+            """,
+            {
+                "user_id": user_id,
+                "week_label": current_week,
+                "quality_score": request.quality_score,
+            },
+        )
+
+        # 3. 일일 제출 현황 업데이트
         await database.execute(
             """
             INSERT INTO daily_submissions (user_id, submission_date, submission_count, quality_score_avg)
@@ -667,25 +1010,117 @@ async def update_daily_submission(
                 ),
                 created_at = CURRENT_TIMESTAMP
             """,
-            {"user_id": user_id, "quality_score": quality_score},
+            {
+                "user_id": user_id,
+                "quality_score": request.quality_score,
+            },
         )
 
-        # 2. 사용자의 총 제출 수 업데이트
+        # 4. 사용자의 총 제출 수 업데이트
         await database.execute(
             "UPDATE users SET submission_count = submission_count + 1 WHERE id = :user_id",
             {"user_id": user_id},
         )
 
-        print(f"✅ Successfully updated daily submission for user {user_id}")
+        print(f"✅ Search data saved for user {user_id}")
         return {
             "success": True,
-            "message": "제출 현황이 업데이트되었습니다.",
+            "message": "검색 데이터가 저장되었습니다.",
             "user_id": user_id,
-            "quality_score": quality_score,
         }
 
     except Exception as e:
-        print(f"❌ Daily submission update error for user {user_id}: {e}")
+        print(f"❌ Search completed error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auction-completed")
+async def auction_completed(
+    request: AuctionCompletedRequest, current_user: dict = Depends(get_current_user)
+):
+    """경매 완료 시 상태 업데이트 및 거래 내역 생성"""
+    try:
+        user_id = current_user["id"]
+
+        print(f"🏆 Auction completed for user {user_id}: {request.search_id}")
+
+        # 1. 경매 상태를 'completed'로 업데이트
+        await database.execute(
+            """
+            UPDATE auctions 
+            SET status = 'completed', selected_bid_id = :selected_bid_id
+            WHERE search_id = :search_id AND user_id = :user_id
+            """,
+            {
+                "search_id": request.search_id,
+                "selected_bid_id": request.selected_bid_id,
+                "user_id": user_id,
+            },
+        )
+
+        # 2. 선택된 입찰 정보 가져오기
+        bid_info = await database.fetch_one(
+            """
+            SELECT buyer_name, price, bonus_description, landing_url
+            FROM bids 
+            WHERE id = :bid_id
+            """,
+            {"bid_id": request.selected_bid_id},
+        )
+
+        if not bid_info:
+            raise HTTPException(
+                status_code=404, detail="선택된 입찰 정보를 찾을 수 없습니다."
+            )
+
+        # 3. 거래 내역 생성
+        transaction_id = f"TXN_{request.search_id}_{int(datetime.now().timestamp())}"
+
+        await database.execute(
+            """
+            INSERT INTO transactions (
+                id, user_id, auction_id, query_text, buyer_name, 
+                primary_reward, status, created_at
+            )
+            VALUES (
+                :transaction_id, :user_id, 
+                (SELECT id FROM auctions WHERE search_id = :search_id),
+                (SELECT query_text FROM auctions WHERE search_id = :search_id),
+                :buyer_name, :primary_reward, '1차 완료', CURRENT_TIMESTAMP
+            )
+            """,
+            {
+                "transaction_id": transaction_id,
+                "user_id": user_id,
+                "search_id": request.search_id,
+                "buyer_name": bid_info["buyer_name"],
+                "primary_reward": request.reward_amount,
+            },
+        )
+
+        # 4. 사용자의 총 수익 업데이트
+        await database.execute(
+            """
+            UPDATE users 
+            SET total_earnings = total_earnings + :reward_amount 
+            WHERE id = :user_id
+            """,
+            {
+                "user_id": user_id,
+                "reward_amount": request.reward_amount,
+            },
+        )
+
+        print(f"✅ Auction completed and transaction created for user {user_id}")
+        return {
+            "success": True,
+            "message": "경매가 완료되었습니다.",
+            "transaction_id": transaction_id,
+            "reward_amount": request.reward_amount,
+        }
+
+    except Exception as e:
+        print(f"❌ Auction completed error for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

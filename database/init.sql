@@ -86,13 +86,14 @@ CREATE TABLE IF NOT EXISTS verification_requests (
     processed_at TIMESTAMP
 );
 
--- 📊 사용자 품질 이력 테이블
+-- 📊 사용자 품질 이력 테이블 (UNIQUE 제약조건 추가)
 CREATE TABLE IF NOT EXISTS user_quality_history (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
     quality_score INTEGER NOT NULL,
     week_label VARCHAR(20) NOT NULL,
-    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, week_label)
 );
 
 -- 📅 일일 제출 현황 테이블
@@ -102,7 +103,9 @@ CREATE TABLE IF NOT EXISTS daily_submissions (
     submission_date DATE DEFAULT CURRENT_DATE,
     submission_count INTEGER DEFAULT 0,
     quality_score_avg INTEGER DEFAULT 0,
+    total_quality_score INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, submission_date)
 );
 

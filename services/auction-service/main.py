@@ -130,7 +130,24 @@ async def find_matching_advertisers(
         List[Dict[str, Any]]: 매칭된 광고주 정보와 점수가 포함된 리스트.
                                (예: [{'advertiser_id': 1, 'match_score': 0.95}, ...])
     """
-    search_tokens = set(search_query.lower().split())
+    # 한글 검색어 처리를 위한 토큰화 개선
+    search_tokens = set()
+
+    # 1. 전체 검색어를 하나의 토큰으로 추가
+    search_tokens.add(search_query.lower())
+
+    # 2. 공백으로 분리된 토큰들 추가 (영어, 숫자 등)
+    search_tokens.update(search_query.lower().split())
+
+    # 3. 한글 검색어의 경우 부분 문자열도 토큰으로 추가 (2글자 이상)
+    if any(ord(char) > 127 for char in search_query):  # 한글이 포함된 경우
+        for i in range(len(search_query) - 1):
+            for j in range(i + 2, len(search_query) + 1):
+                token = search_query[i:j].lower()
+                if len(token) >= 2:
+                    search_tokens.add(token)
+
+    print(f"🔍 검색 토큰: {search_tokens}")
     matched_advertisers = {}
 
     # --- 매칭 전략 1: 직접 키워드 매칭 (가중치: 1.0) ---
@@ -671,6 +688,11 @@ async def simulate_auction_update(auction_id: str) -> dict:
 async def start_auction(request: StartAuctionRequest):
     """역경매를 시작합니다."""
     try:
+        # 한글 검색어 디버깅
+        print(f"🔍 받은 검색어: '{request.query}' (길이: {len(request.query)})")
+        print(f"🔍 검색어 바이트: {request.query.encode('utf-8')}")
+        print(f"🔍 검색어 유니코드: {[ord(c) for c in request.query]}")
+
         # 역경매 시작 (실제 광고주 매칭 시스템 사용)
         bids = await start_reverse_auction(request.query, request.valueScore)
 

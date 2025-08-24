@@ -79,10 +79,23 @@ class UserQualityHistory(Base):
 
 # Database connection functions
 async def connect_to_database():
-    await database.connect()
-    print("✅ User Service database connected successfully!")
+    try:
+        print("🔌 Attempting to connect to database...")
+        print(f"🔌 Database URL: {DATABASE_URL}")
+        await database.connect()
+        print("✅ User Service database connected successfully!")
+    except Exception as e:
+        print(f"❌ Database connection failed: {str(e)}")
+        print(f"❌ Error type: {type(e)}")
+        import traceback
+
+        print(f"❌ Traceback: {traceback.format_exc()}")
+        raise e
 
 
 async def disconnect_from_database():
-    await database.disconnect()
-    print("User Service database disconnected")
+    try:
+        await database.disconnect()
+        print("User Service database disconnected")
+    except Exception as e:
+        print(f"❌ Database disconnection error: {str(e)}")

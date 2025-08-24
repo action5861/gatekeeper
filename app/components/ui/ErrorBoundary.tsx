@@ -27,41 +27,13 @@ export class ErrorBoundary extends Component<Props, State> {
     componentDidCatch(error: Error, errorInfo: ErrorInfo) {
         console.error('ErrorBoundary caught an error:', error, errorInfo)
 
-        // 에러 모니터링 로그
-        this.logError(error, errorInfo)
-
-        // 부모 컴포넌트에 에러 전달
-        this.props.onError?.(error, errorInfo)
-    }
-
-    private logError = (error: Error, errorInfo: ErrorInfo) => {
-        // 에러 로깅 로직
-        const errorLog = {
-            message: error.message,
-            stack: error.stack,
-            componentStack: errorInfo.componentStack,
-            timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
-            url: window.location.href,
-        }
-
-        // 실제 프로덕션에서는 에러 모니터링 서비스로 전송
-        console.error('Error Log:', errorLog)
-
-        // 로컬 스토리지에 에러 히스토리 저장 (최대 10개)
-        try {
-            const errorHistory = JSON.parse(localStorage.getItem('errorHistory') || '[]')
-            errorHistory.unshift(errorLog)
-            if (errorHistory.length > 10) {
-                errorHistory.pop()
-            }
-            localStorage.setItem('errorHistory', JSON.stringify(errorHistory))
-        } catch (e) {
-            console.error('Failed to save error to localStorage:', e)
+        // 에러 로깅 서비스에 전송 (예: Sentry, LogRocket 등)
+        if (this.props.onError) {
+            this.props.onError(error, errorInfo)
         }
     }
 
-    private handleRetry = () => {
+    handleRetry = () => {
         this.setState({ hasError: false, error: undefined })
     }
 
@@ -72,25 +44,52 @@ export class ErrorBoundary extends Component<Props, State> {
             }
 
             return (
-                <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
-                    <div className="flex items-center justify-center h-64">
-                        <div className="flex flex-col items-center space-y-4 text-center">
-                            <AlertCircle className="w-12 h-12 text-red-400" />
-                            <div>
-                                <h3 className="text-lg font-semibold text-red-400 mb-2">
-                                    Something went wrong
-                                </h3>
-                                <p className="text-slate-400 text-sm mb-4 max-w-md">
-                                    {this.state.error?.message || 'An unexpected error occurred'}
-                                </p>
-                                <button
-                                    onClick={this.handleRetry}
-                                    className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-                                >
-                                    <RefreshCw className="w-4 h-4" />
-                                    <span>Try Again</span>
-                                </button>
-                            </div>
+                <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+                    <div className="max-w-md mx-auto text-center p-8">
+                        <div className="w-20 h-20 bg-gradient-to-r from-red-500 to-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                            <AlertCircle className="w-10 h-10 text-white" />
+                        </div>
+
+                        <h2 className="text-2xl font-bold text-slate-100 mb-4">
+                            오류가 발생했습니다
+                        </h2>
+
+                        <p className="text-slate-400 mb-6">
+                            페이지를 불러오는 중 문제가 발생했습니다.
+                            다시 시도해주세요.
+                        </p>
+
+                        {process.env.NODE_ENV === 'development' && this.state.error && (
+                            <details className="mb-6 text-left">
+                                <summary className="text-slate-300 cursor-pointer mb-2">
+                                    개발자 정보 (클릭하여 확장)
+                                </summary>
+                                <div className="bg-slate-800/50 border border-slate-600 rounded-lg p-4 text-sm">
+                                    <p className="text-red-400 font-mono mb-2">
+                                        {this.state.error.name}: {this.state.error.message}
+                                    </p>
+                                    <pre className="text-slate-400 text-xs overflow-auto">
+                                        {this.state.error.stack}
+                                    </pre>
+                                </div>
+                            </details>
+                        )}
+
+                        <div className="space-y-4">
+                            <button
+                                onClick={this.handleRetry}
+                                className="w-full px-6 py-3 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl hover:from-blue-600 hover:to-cyan-600 transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-500/20 flex items-center justify-center space-x-2"
+                            >
+                                <RefreshCw className="w-5 h-5" />
+                                <span>다시 시도</span>
+                            </button>
+
+                            <button
+                                onClick={() => window.location.reload()}
+                                className="w-full px-6 py-3 border-2 border-slate-600 text-slate-300 rounded-xl hover:bg-slate-700 hover:border-slate-500 transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-slate-500/20"
+                            >
+                                페이지 새로고침
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -101,29 +100,17 @@ export class ErrorBoundary extends Component<Props, State> {
     }
 }
 
-// 함수형 컴포넌트용 에러 처리 훅
-export function useErrorHandler() {
-    const [error, setError] = React.useState<Error | null>(null)
-
-    const handleError = React.useCallback((error: Error) => {
-        console.error('Error caught by useErrorHandler:', error)
-        setError(error)
-
-        // 에러 로깅
-        const errorLog = {
-            message: error.message,
-            stack: error.stack,
-            timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
-            url: window.location.href,
-        }
-
-        console.error('Error Log:', errorLog)
-    }, [])
-
-    const clearError = React.useCallback(() => {
-        setError(null)
-    }, [])
-
-    return { error, handleError, clearError }
+// 함수형 컴포넌트용 에러 바운더리 훅
+export function withErrorBoundary<P extends object>(
+    Component: React.ComponentType<P>,
+    fallback?: ReactNode,
+    onError?: (error: Error, errorInfo: ErrorInfo) => void
+) {
+    return function WithErrorBoundary(props: P) {
+        return (
+            <ErrorBoundary fallback={fallback} onError={onError}>
+                <Component {...props} />
+            </ErrorBoundary>
+        )
+    }
 } 

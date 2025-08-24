@@ -4,8 +4,10 @@ import Header from '@/components/Header'
 import ReviewStatus from '@/components/advertiser/ReviewStatus'
 import AccountSettings from '@/components/dashboard/AccountSettings'
 import BiddingSummary from '@/components/dashboard/BiddingSummary'
+import BudgetStatus from '@/components/dashboard/BudgetStatus'
 import MyBids from '@/components/dashboard/MyBids'
 import PerformanceHistory from '@/components/dashboard/PerformanceHistory'
+import { Clock } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
@@ -29,6 +31,15 @@ interface DashboardData {
         highestBid?: number
         myBid: number
     }>
+    additionalStats?: {
+        autoBidEnabled: boolean
+        dailyBudget: number
+        todaySpent: number
+        budgetUsagePercent: number
+        maxBidPerKeyword: number
+        minQualityScore: number
+        remainingBudget: number
+    }
 }
 
 export default function AdvertiserDashboard() {
@@ -149,10 +160,15 @@ export default function AdvertiserDashboard() {
                                 <PerformanceHistory performanceHistory={dashboardData?.performanceHistory} />
                             </div>
 
-                            {/* Account Settings */}
+                            {/* Budget Status */}
                             <div className="animate-fadeInUp animation-delay-400">
-                                <AccountSettings />
+                                <BudgetStatus additionalStats={dashboardData?.additionalStats} />
                             </div>
+                        </div>
+
+                        {/* Account Settings */}
+                        <div className="mt-8 animate-fadeInUp animation-delay-600">
+                            <AccountSettings />
                         </div>
 
                         {/* Additional Stats */}

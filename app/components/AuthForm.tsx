@@ -96,6 +96,9 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
             }
 
             console.log('Submitting form data:', { userType: formData.userType, email: formData.email, mode })
+            console.log('Full form data:', formData)
+            console.log('Username value:', username)
+            console.log('Username trimmed:', username.trim())
 
             await onSubmit(formData)
         } catch (err) {

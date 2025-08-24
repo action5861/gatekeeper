@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, validator, Field
 from typing import List, Literal, Optional
 from datetime import datetime
 import random
@@ -11,6 +11,9 @@ from database import (
     connect_to_database,
     disconnect_from_database,
 )
+import os
+import re
+import html
 
 app = FastAPI(title="Payment Service", version="1.0.0")
 
@@ -37,41 +40,152 @@ app.add_middleware(
 )
 
 
+# 입력값 검증 함수들
+def sanitize_input(value: str) -> str:
+    """XSS 방지를 위한 입력값 이스케이핑"""
+    if not isinstance(value, str):
+        return str(value)
+    return html.escape(value.strip())
+
+
+def validate_sql_injection(value: str) -> bool:
+    """SQL Injection 방지를 위한 검증"""
+    sql_patterns = [
+        r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|UNION|SCRIPT)\b)",
+        r"(\b(OR|AND)\b\s+\d+\s*=\s*\d+)",
+        r"(\b(OR|AND)\b\s+['\"]?\w+['\"]?\s*=\s*['\"]?\w+['\"]?)",
+        r"(--|#|/\*|\*/)",
+        r"(\b(WAITFOR|DELAY)\b)",
+        r"(\b(BENCHMARK|SLEEP)\b)",
+    ]
+
+    value_upper = value.upper()
+    for pattern in sql_patterns:
+        if re.search(pattern, value_upper, re.IGNORECASE):
+            return False
+    return True
+
+
 # Pydantic 모델
 class Transaction(BaseModel):
-    id: str
-    query: str
-    buyerName: str
-    primaryReward: int
-    secondaryReward: Optional[int] = None
-    status: Literal["1차 완료", "검증 대기중", "2차 완료", "검증 실패"]
-    timestamp: str
+    id: str = Field(..., max_length=100)
+    query: str = Field(..., max_length=500)
+    buyerName: str = Field(..., max_length=100)
+    primaryReward: int = Field(..., ge=0, le=1000000)
+    status: str = Field(..., max_length=50)
+    timestamp: str = Field(..., max_length=50)
+
+    @validator("id")
+    def validate_id(cls, v):
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError(
+                "거래 ID는 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("거래 ID에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("query")
+    def validate_query(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("검색어에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("buyerName")
+    def validate_buyer_name(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("구매자명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("status")
+    def validate_status(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("상태에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("timestamp")
+    def validate_timestamp(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("타임스탬프에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class RewardRequest(BaseModel):
-    bidId: str
-    amount: int
-    query: str
-    buyerName: str
+    query: str = Field(..., max_length=500)
+    buyerName: str = Field(..., max_length=100)
+    amount: int = Field(..., ge=0, le=1000000)
+
+    @validator("query")
+    def validate_query(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("검색어에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("buyerName")
+    def validate_buyer_name(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("구매자명에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class RewardResponse(BaseModel):
     success: bool
-    message: str
-    amount: Optional[int] = None
-    transactionId: Optional[str] = None
+    message: str = Field(..., max_length=500)
+    amount: Optional[int] = Field(None, ge=0, le=1000000)
+    transactionId: Optional[str] = Field(None, max_length=100)
     transaction: Optional[Transaction] = None
-    error: Optional[str] = None
+    error: Optional[str] = Field(None, max_length=100)
+
+    @validator("message")
+    def validate_message(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("메시지에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("transactionId")
+    def validate_transaction_id(cls, v):
+        if v is None:
+            return v
+        v = sanitize_input(v)
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError(
+                "거래 ID는 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다"
+            )
+        if not validate_sql_injection(v):
+            raise ValueError("거래 ID에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("error")
+    def validate_error(cls, v):
+        if v is None:
+            return v
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("에러 코드에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class TransactionsResponse(BaseModel):
-    success: bool
     transactions: List[Transaction]
+    total: int = Field(..., ge=0)
+    page: int = Field(..., ge=1)
+    limit: int = Field(..., ge=1, le=100)
 
 
 # JWT 설정
-SECRET_KEY = "a_very_secret_key_for_jwt"
+SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production"
+)
 ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 security = HTTPBearer()
 
 
@@ -155,18 +269,27 @@ async def process_reward(
                 amount=request.amount,
                 transactionId=new_transaction.id,
                 transaction=new_transaction,
+                error=None,
             )
         else:
             return RewardResponse(
                 success=False,
                 message="보상 지급 중 오류가 발생했습니다. 다시 시도해주세요.",
+                amount=None,
+                transactionId=None,
+                transaction=None,
                 error="PAYMENT_ERROR",
             )
 
     except Exception as e:
         print(f"❌ Payment API error for user {user_id}: {e}")
         return RewardResponse(
-            success=False, message="서버 오류가 발생했습니다.", error="SERVER_ERROR"
+            success=False,
+            message="서버 오류가 발생했습니다.",
+            amount=None,
+            transactionId=None,
+            transaction=None,
+            error="SERVER_ERROR",
         )
 
 
@@ -178,8 +301,7 @@ async def get_transactions():
         transactions_data = await database.fetch_all(
             """
             SELECT id, query_text as query, buyer_name as "buyerName", 
-                   primary_reward as "primaryReward", secondary_reward as "secondaryReward",
-                   status, created_at as timestamp
+                   primary_reward as "primaryReward", status, created_at as timestamp
             FROM transactions 
             ORDER BY created_at DESC
             """
@@ -192,9 +314,6 @@ async def get_transactions():
                 query=row["query"],
                 buyerName=row["buyerName"],
                 primaryReward=int(row["primaryReward"]),
-                secondaryReward=(
-                    int(row["secondaryReward"]) if row["secondaryReward"] else None
-                ),
                 status=row["status"],
                 timestamp=(
                     row["timestamp"].isoformat()
@@ -206,7 +325,12 @@ async def get_transactions():
         ]
 
         print(f"GET transactions called, count: {len(transactions)}")
-        return TransactionsResponse(success=True, transactions=transactions)
+        return TransactionsResponse(
+            transactions=transactions,
+            total=len(transactions),
+            page=1,
+            limit=len(transactions),
+        )
     except Exception as e:
         print(f"Error fetching transactions: {e}")
         raise HTTPException(
