@@ -17,6 +17,7 @@ DigiSafe는 사용자의 중요한 정보를 안전하게 저장하고, 긴급 �
 | **Verification Service** | 8004 | 2차 보상 검증 | FastAPI, Python |
 | **User Service** | 8005 | 사용자 데이터 관리 | FastAPI, Python |
 | **Quality Service** | 8006 | 동적 제출 한도 관리 | FastAPI, Python |
+| **Advertiser Service** | 8007 | 광고주 관리 및 자동입찰 | FastAPI, Python |
 
 ### API Gateway
 
@@ -27,6 +28,7 @@ AWS API Gateway를 통해 모든 마이크로서비스의 요청을 중앙에서
 - `/api/reward` → Payment Service
 - `/api/verify` → Verification Service
 - `/api/user/*` → User Service
+- `/api/advertiser/*` → Advertiser Service
 
 ## 🚀 빠른 시작
 
@@ -74,6 +76,7 @@ AWS API Gateway를 통해 모든 마이크로서비스의 요청을 중앙에서
    export VERIFICATION_SERVICE_URL=http://your-alb-dns:8004
    export USER_SERVICE_URL=http://your-alb-dns:8005
    export QUALITY_SERVICE_URL=http://your-alb-dns:8006
+   export ADVERTISER_SERVICE_URL=http://your-alb-dns:8007
    ```
 
 ## 📁 프로젝트 구조
@@ -104,7 +107,8 @@ gatekeeper/
 │   ├── payment-service/          # 결제 서비스
 │   ├── verification-service/     # 검증 서비스
 │   ├── user-service/             # 사용자 서비스
-│   └── quality-service/          # 품질 관리 서비스
+│   ├── quality-service/          # 품질 관리 서비스
+│   └── advertiser-service/       # 광고주 관리 서비스
 ├── database/                     # 데이터베이스 스키마
 │   └── init.sql                  # 초기 데이터베이스 설정
 ├── terraform/                    # AWS 인프라 코드
@@ -146,7 +150,13 @@ gatekeeper/
 - 동적 제출 한도 계산
 - 품질 점수 기반 제한 관리
 
-### 7. 대시보드 시스템 (Enhanced)
+### 7. 광고주 관리 (Advertiser Service)
+- 광고주 회원가입 및 인증
+- 자동입찰 시스템
+- 머신러닝 기반 입찰 최적화
+- 광고주 대시보드 및 성과 분석
+
+### 8. 대시보드 시스템 (Enhanced)
 - **실시간 데이터 연동**: 모든 통계가 실제 DB 데이터 기반
 - **에러 처리**: 네트워크 에러, 로딩 실패 등에 대한 재시도 버튼
 - **로딩 상태**: Skeleton UI와 독립적 로딩 스피너
@@ -231,6 +241,51 @@ gatekeeper/
 - **에러 히스토리**: 로컬 스토리지에 에러 기록 저장
 - **성능 최적화**: 불필요한 API 호출 방지 및 효율적인 캐싱
 
+## 🆕 최신 업데이트 (2025-09-05)
+
+### ✅ Advertiser Service 추가 및 최적화
+
+#### **새로운 서비스 추가**
+- **Advertiser Service (포트 8007)**: 광고주 관리 및 자동입찰 시스템
+- **머신러닝 기반 입찰 최적화**: AutoBidOptimizer를 통한 지능형 입찰가 계산
+- **광고주 대시보드**: 실시간 성과 분석 및 통계 제공
+- **자동입찰 시스템**: 품질 점수, 경쟁 상황, 예산 등을 고려한 자동 입찰
+
+#### **주요 기능**
+- **광고주 회원가입/로그인**: JWT 기반 인증 시스템
+- **비즈니스 설정**: 키워드, 카테고리, 예산 설정
+- **심사 시스템**: 관리자 승인 기반 광고주 활성화
+- **성과 분석**: 키워드별, 시간대별 입찰 성과 분석
+- **최적화 제안**: AI 기반 입찰 전략 개선 제안
+
+#### **기술적 개선사항**
+- **타입 안전성**: 모든 Record 타입 에러 해결
+- **비동기 데이터베이스**: `postgresql+asyncpg://` 드라이버 사용
+- **JWT 통일**: 게이트웨이와 동일한 시크릿 키 사용
+- **환경변수 최적화**: 모든 서비스 URL 및 설정 통합
+
+#### **환경변수 설정 개선**
+```bash
+# JWT 보안 (게이트웨이와 통일)
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production-must-be-32-chars-minimum
+JWT_ISSUER=digisafe-api
+JWT_AUDIENCE=digisafe-client
+
+# 데이터베이스 (비동기 드라이버)
+DATABASE_URL=postgresql+asyncpg://admin:your_secure_password_123@localhost:5433/search_exchange_db
+
+# 모든 서비스 URL (게이트웨이용)
+ADVERTISER_SERVICE_URL=http://localhost:8007
+ANALYSIS_SERVICE_URL=http://localhost:8001
+VERIFICATION_SERVICE_URL=http://localhost:8004
+```
+
+#### **코드 품질 향상**
+- **에러 처리**: Record 타입을 dict로 변환하여 안전한 데이터 접근
+- **보안 강화**: 하드코딩된 시크릿 키 제거
+- **메모리 효율성**: 불필요한 import 제거로 19.4% 코드 라인 감소
+- **런타임 안정성**: 모든 타입 에러 해결
+
 ## 🔧 최근 해결된 문제점들
 
 ### ✅ 데이터 흐름 연결 완료
@@ -264,6 +319,27 @@ gatekeeper/
 python test_dashboard_data.py
 ```
 
+### Advertiser Service 테스트
+```bash
+# Advertiser Service 디렉토리로 이동
+cd services/advertiser-service
+
+# 가상환경 활성화
+.\venv\Scripts\Activate.ps1  # Windows
+# source venv/bin/activate    # Linux/Mac
+
+# 환경변수 설정
+$env:JWT_SECRET_KEY="your-super-secret-jwt-key-change-in-production-must-be-32-chars-minimum"
+$env:DATABASE_URL="postgresql+asyncpg://admin:your_secure_password_123@localhost:5433/search_exchange_db"
+
+# 서비스 실행
+python main.py
+
+# API 테스트
+curl http://localhost:8007/health
+curl http://localhost:8007/business-categories
+```
+
 ### 수동 테스트 시나리오
 1. **로그인**: 사용자 계정으로 로그인
 2. **검색**: 메인 페이지에서 검색어 입력 및 제출
@@ -275,6 +351,16 @@ python test_dashboard_data.py
    - Avg Quality Score
 4. **입찰 선택**: 경매에서 입찰 선택 후 거래 내역 확인
 5. **실시간 갱신**: 30초 후 자동 데이터 갱신 확인
+
+### Advertiser Service 테스트 시나리오
+1. **서비스 실행**: Advertiser Service가 포트 8007에서 정상 실행되는지 확인
+2. **Health Check**: `GET /health` 엔드포인트로 서비스 상태 확인
+3. **비즈니스 카테고리**: `GET /business-categories`로 카테고리 목록 조회
+4. **광고주 회원가입**: `POST /register`로 새 광고주 등록
+5. **로그인**: `POST /login`으로 JWT 토큰 발급
+6. **대시보드**: `GET /dashboard`로 광고주 대시보드 데이터 확인
+7. **자동입찰 최적화**: `POST /auto-bid/optimize`로 입찰가 최적화 테스트
+8. **API 문서**: `http://localhost:8007/docs`로 Swagger UI 확인
 
 ## 🤝 기여하기
 
