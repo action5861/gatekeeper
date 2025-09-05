@@ -1,11 +1,9 @@
-// 검색어 수신, 가치 평가 및 역경매 개시 (프록시)
+// 검색어 수신, 가치 평가 및 역경매 개시 (API Gateway를 통한 프록시)
 
 import { ApiResponse } from '@/lib/types';
 import { NextRequest, NextResponse } from 'next/server';
 
-const ANALYSIS_SERVICE_URL = process.env.ANALYSIS_SERVICE_URL || 'http://analysis-service:8001';
-const AUCTION_SERVICE_URL = process.env.AUCTION_SERVICE_URL || 'http://auction-service:8002';
-const USER_SERVICE_URL = process.env.USER_SERVICE_URL || 'http://user-service:8005';
+const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:8000';
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,29 +35,31 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // 1단계: Analysis Service에서 데이터 가치 평가
-    const analysisResponse = await fetch(`${ANALYSIS_SERVICE_URL}/evaluate`, {
+    // API Gateway를 통해 검색 처리
+    const gatewayResponse = await fetch(`${API_GATEWAY_URL}/api/analysis/evaluate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': authHeader,
       },
       body: JSON.stringify({ query: query.trim() }),
     });
 
-    if (!analysisResponse.ok) {
-      throw new Error('Analysis service error');
+    if (!gatewayResponse.ok) {
+      const errorData = await gatewayResponse.json();
+      throw new Error(errorData.detail || 'Analysis service error');
     }
 
-    const analysisData = await analysisResponse.json();
+    const analysisData = await gatewayResponse.json();
     const qualityReport = analysisData.data;
 
-    // 2단계: Auction Service에서 역경매 시작
-    console.log('Calling auction service with:', { query: query.trim(), valueScore: qualityReport.score });
-    const auctionResponse = await fetch(`${AUCTION_SERVICE_URL}/start`, {
+    // API Gateway를 통해 경매 시작
+    console.log('Calling auction service via API Gateway with:', { query: query.trim(), valueScore: qualityReport.score });
+    const auctionResponse = await fetch(`${API_GATEWAY_URL}/api/auction/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': authHeader, // 사용자 정보 전달
+        'Authorization': authHeader,
       },
       body: JSON.stringify({
         query: query.trim(),
@@ -69,34 +69,29 @@ export async function POST(request: NextRequest) {
 
     console.log('Auction service response status:', auctionResponse.status);
     if (!auctionResponse.ok) {
-      const errorText = await auctionResponse.text();
-      console.error('Auction service error response:', errorText);
-      throw new Error('Auction service error');
+      const errorData = await auctionResponse.json();
+      console.error('Auction service error response:', errorData);
+      throw new Error(errorData.detail || 'Auction service error');
     }
 
     const auctionData = await auctionResponse.json();
     const auction = auctionData.data;
 
-    // 3단계: User Service에 검색 데이터 저장 및 통계 업데이트
+    // API Gateway를 통해 사용자 서비스에 검색 데이터 저장
     try {
-      const userServiceResponse = await fetch(`${USER_SERVICE_URL}/search-completed`, {
+      const userServiceResponse = await fetch(`${API_GATEWAY_URL}/api/user/update-daily-submission`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': authHeader,
         },
         body: JSON.stringify({
-          query: query.trim(),
-          quality_score: qualityReport.score,
-          commercial_value: qualityReport.commercialValue,
-          keywords: qualityReport.keywords,
-          suggestions: qualityReport.suggestions,
-          auction_id: auction.searchId
+          quality_score: qualityReport.score
         }),
       });
 
       if (userServiceResponse.ok) {
-        console.log('✅ Search data saved to user service');
+        console.log('✅ Search data saved to user service via API Gateway');
       } else {
         console.warn('⚠️ Failed to save search data to user service');
       }

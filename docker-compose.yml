@@ -134,6 +134,37 @@ services:
       postgres:
         condition: service_healthy
 
+  # 🌐 API Gateway
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
+      - JWT_ALG=HS256
+      - JWT_ISSUER=digisafe-api
+      - JWT_AUDIENCE=digisafe-client
+      - PORT=8000
+      - CORS_ALLOW_ORIGINS=http://localhost:3000
+      - USER_SERVICE_URL=http://user-service:8005
+      - ADVERTISER_SERVICE_URL=http://advertiser-service:8007
+      - AUCTION_SERVICE_URL=http://auction-service:8002
+      - PAYMENT_SERVICE_URL=http://payment-service:8003
+      - QUALITY_SERVICE_URL=http://quality-service:8006
+      - ANALYSIS_SERVICE_URL=http://analysis-service:8001
+      - VERIFICATION_SERVICE_URL=http://verification-service:8004
+    networks:
+      - app-network
+    depends_on:
+      - user-service
+      - advertiser-service
+      - auction-service
+      - payment-service
+      - quality-service
+      - analysis-service
+      - verification-service
+
   # 🌐 Frontend
   frontend:
     build: .
@@ -141,6 +172,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      - API_GATEWAY_URL=http://api-gateway:8000
       - USER_SERVICE_URL=http://user-service:8005
       - ADVERTISER_SERVICE_URL=http://advertiser-service:8007
       - PAYMENT_SERVICE_URL=http://payment-service:8003
@@ -151,6 +183,7 @@ services:
     networks:
       - app-network
     depends_on:
+      - api-gateway
       - analysis-service
       - auction-service
       - payment-service

@@ -1,18 +1,14 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server';
+
+const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:8000';
 
 export async function POST(request: NextRequest) {
     try {
-        console.log('🔐 Registration API called')
+        console.log('🔐 Registration API called via API Gateway')
         const body = await request.json()
         const { userType, email, password, username, companyName, businessSetup } = body
 
         console.log('📝 Registration data:', { userType, email, username: username || email })
-
-        const serviceUrl = userType === 'advertiser'
-            ? process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
-            : process.env.USER_SERVICE_URL || 'http://localhost:8005'
-
-        console.log('🌐 Service URL:', serviceUrl)
 
         const requestBody = userType === 'advertiser'
             ? {
@@ -30,8 +26,13 @@ export async function POST(request: NextRequest) {
 
         console.log('📤 Request body:', { ...requestBody, password: '[HIDDEN]' })
 
-        console.log('🚀 Sending request to service...')
-        const response = await fetch(`${serviceUrl}/register`, {
+        // API Gateway를 통해 등록 처리
+        const gatewayPath = userType === 'advertiser'
+            ? '/api/advertiser/register'
+            : '/api/auth/register';
+
+        console.log('🚀 Sending request to API Gateway...')
+        const response = await fetch(`${API_GATEWAY_URL}${gatewayPath}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -53,7 +54,7 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        console.log('✅ Registration successful')
+        console.log('✅ Registration successful via API Gateway')
         // Add userType to the response for frontend routing
         return NextResponse.json({
             ...data,
