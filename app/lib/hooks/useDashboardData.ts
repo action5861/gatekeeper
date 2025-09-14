@@ -1,5 +1,6 @@
 'use client'
 
+import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
@@ -57,27 +58,16 @@ interface DashboardData {
 }
 
 const fetchDashboardData = async (): Promise<DashboardData> => {
-    const token = localStorage.getItem('token')
-    if (!token) {
-        throw new Error('No authentication token found')
-    }
-
-    const response = await fetch('/api/user/dashboard', {
-        headers: {
-            'Authorization': `Bearer ${token}`,
-        },
-    })
-
-    if (!response.ok) {
-        if (response.status === 401) {
-            localStorage.removeItem('token')
-            localStorage.removeItem('userType')
+    try {
+        const response = await authenticatedFetch('/api/user/dashboard')
+        return response.json()
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('로그인이 만료')) {
+            handleTokenExpiry()
             throw new Error('Authentication failed')
         }
-        throw new Error(`Failed to fetch dashboard data: ${response.status}`)
+        throw error
     }
-
-    return response.json()
 }
 
 export function useDashboardData() {

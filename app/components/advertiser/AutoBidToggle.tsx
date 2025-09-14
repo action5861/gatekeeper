@@ -1,6 +1,6 @@
 'use client'
 
-import { AlertCircle, CheckCircle, Clock, Switch, TrendingUp } from 'lucide-react'
+import { AlertCircle, CheckCircle, Clock, ToggleLeft, TrendingUp } from 'lucide-react'
 import { useState } from 'react'
 
 interface AutoBidToggleProps {
@@ -42,7 +42,7 @@ export default function AutoBidToggle({ isEnabled, onToggle, isLoading = false }
                         </p>
                     </div>
                 </div>
-                <Switch
+                <ToggleLeft
                     checked={isEnabled}
                     onCheckedChange={handleToggle}
                     disabled={isLoading || isToggling}
@@ -53,7 +53,7 @@ export default function AutoBidToggle({ isEnabled, onToggle, isLoading = false }
                         className={`${isEnabled ? 'translate-x-6' : 'translate-x-1'
                             } inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
                     />
-                </Switch>
+                </ToggleLeft>
             </div>
 
             {/* 상태별 설명 */}

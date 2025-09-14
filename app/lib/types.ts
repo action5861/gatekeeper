@@ -8,6 +8,7 @@ export interface Bid {
   bonus: string;
   timestamp: Date;
   landingUrl: string; // 클릭 시 이동할 외부 사이트 주소
+  clickUrl: string; // 리다이렉트를 위한 서명된 URL
 }
 
 // 경매 정보를 담는 타입

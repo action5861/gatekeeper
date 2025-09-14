@@ -6,18 +6,26 @@ import Header from '@/components/Header'
 import AuctionStatus from '@/components/main/AuctionStatus'
 import QualityAdvisor from '@/components/main/QualityAdvisor'
 import SearchInput from '@/components/main/SearchInput'
+import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth'
+import { useDebounce } from '@/lib/hooks/useDebounce'
 import { Auction, QualityReport } from '@/lib/types'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export default function Home() {
   // 상태 관리
   const [query, setQuery] = useState('')
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null)
+
+  // StrictMode 가드용 ref
+  const didRunRef = useRef(false)
   const [auction, setAuction] = useState<Auction | null>(null)
   const [selectedBid, setSelectedBid] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+
+  // 디바운싱 적용: 1000ms 동안 타이핑이 없으면 최종 값을 반영
+  const debouncedQuery = useDebounce(query, 1000)
 
   // 알림 표시 함수
   const showNotification = (type: 'success' | 'error', message: string) => {
@@ -25,24 +33,34 @@ export default function Home() {
     setTimeout(() => setNotification(null), 5000) // 5초 후 자동 제거
   }
 
-  // Debounce를 위한 useEffect
+  // Step 1: 디바운싱된 검색어가 바뀔 때만 품질 평가 API를 호출 (일일 제출 한도 적용 없음)
   useEffect(() => {
-    if (!query.trim()) {
+    if (!debouncedQuery.trim() || debouncedQuery.trim().length < 2) {
       setQualityReport(null)
+      setIsEvaluating(false)
       return
     }
 
+    // StrictMode 가드: 개발 모드에서 이중 마운트 방지
+    if (didRunRef.current) return;
+    didRunRef.current = true;
+
+    console.log(`🔍 [STEP 1] 디바운싱된 검색어 '${debouncedQuery}'로 품질 평가 API를 호출합니다.`)
     setIsEvaluating(true)
-    const timer = setTimeout(async () => {
+
+    const evaluateQuality = async () => {
       try {
         const token = localStorage.getItem('token')
-        const response = await fetch('/api/search', {
+        console.log(`🔍 [STEP 1] Calling /api/evaluate-quality for query: "${debouncedQuery.trim()}"`)
+        const response = await fetch('/api/evaluate-quality', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token && { 'Authorization': `Bearer ${token}` }),
           },
-          body: JSON.stringify({ query: query.trim() }),
+          body: JSON.stringify({
+            query: debouncedQuery.trim()
+          }),
         })
 
         const data = await response.json()
@@ -59,141 +77,127 @@ export default function Home() {
       } finally {
         setIsEvaluating(false)
       }
-    }, 500) // 0.5초 debounce
+    }
 
-    return () => clearTimeout(timer)
-  }, [query])
+    evaluateQuality()
+
+    // cleanup 함수에서 ref 리셋
+    return () => {
+      didRunRef.current = false
+    }
+  }, [debouncedQuery])
 
   // 검색어 변경 처리
   const handleQueryChange = useCallback((newQuery: string) => {
     setQuery(newQuery)
   }, [])
 
-  // 폼 제출 처리 (경매 시작)
+  // Step 2: 폼 제출 처리 (광고 검색 - 일일 제출 한도 차감 없음)
   const handleSearchSubmit = useCallback(async (searchQuery: string) => {
+    // 품질 평가가 완료되지 않은 경우 제출 불가
+    if (!qualityReport) {
+      showNotification('error', '검색어 품질 평가를 완료한 후 제출해주세요.')
+      return
+    }
+
     setIsLoading(true)
     setAuction(null) // 이전 경매 초기화
     setSelectedBid(null) // 선택된 입찰 초기화
 
     try {
-      const token = localStorage.getItem('token')
-      const response = await fetch('/api/search', {
+      console.log(`🚀 [STEP 2] Calling /api/search for ad search: "${searchQuery}" with quality score: ${qualityReport.score}`)
+      const response = await authenticatedFetch('/api/search', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` }),
-        },
-        body: JSON.stringify({ query: searchQuery }),
+        body: JSON.stringify({
+          query: searchQuery,
+          qualityScore: qualityReport.score // 품질 점수를 함께 전달
+        }),
       })
 
       const data = await response.json()
 
       if (data.success) {
-        setQualityReport(data.data.qualityReport)
         setAuction(data.data.auction)
-        showNotification('success', 'Reverse auction started successfully!')
+        showNotification('success', '광고 검색이 완료되었습니다!')
 
-        // 일일 제출 카운트 업데이트
-        if (token && data.data.qualityReport) {
-          try {
-            await fetch('/api/user/update-daily-submission', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                quality_score: data.data.qualityReport.score
-              }),
-            })
-          } catch (error) {
-            console.error('Failed to update daily submission count:', error)
-          }
-        }
-
-        // 대시보드 데이터 갱신 이벤트 발생
+        // 대시보드 데이터 갱신 이벤트 발생 (일일 제출 한도는 차감되지 않음)
         window.dispatchEvent(new CustomEvent('stats-updated'))
-        window.dispatchEvent(new CustomEvent('submission-updated'))
       } else {
-        console.error('Search failed:', data.error)
-        showNotification('error', data.error || 'Failed to start auction')
+        console.error('Ad search failed:', data.error)
+        showNotification('error', data.error || '광고 검색에 실패했습니다.')
       }
     } catch (error) {
-      console.error('Search error:', error)
-      showNotification('error', 'Network error occurred')
+      console.error('Ad search error:', error)
+      if (error instanceof Error && error.message.includes('로그인이 만료')) {
+        showNotification('error', '로그인이 만료되었습니다. 다시 로그인해주세요.')
+        handleTokenExpiry()
+      } else {
+        showNotification('error', '네트워크 오류가 발생했습니다.')
+      }
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [qualityReport])
 
-  // 입찰 선택 처리
+  // Step 3: 광고 클릭 처리 (일일 제출 한도 차감 및 보상 지급)
   const handleBidSelect = useCallback(async (bidId: string) => {
     if (!auction) return
 
-    console.log('Bid selection started:', { bidId, auction });
+    console.log('🔍 [STEP 3] Ad click started:', { bidId, auction });
 
     setIsLoading(true)
     try {
-      const token = localStorage.getItem('token')
+      const selectedBid = auction.bids.find(bid => bid.id === bidId)
 
-      // 1. 입찰 선택 처리
-      const auctionResponse = await fetch('/api/auction/select', {
+      // 광고 타입 결정 (입찰 광고 vs fallback 광고)
+      const adType = selectedBid ? 'bidded' : 'fallback'
+
+      console.log(`🔍 [STEP 3] Calling /api/track-click: searchId=${auction.searchId}, bidId=${bidId}, adType=${adType}`)
+
+      // Step 3: 클릭 추적 및 보상 지급
+      const trackResponse = await authenticatedFetch('/api/track-click', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` }),
-        },
         body: JSON.stringify({
           searchId: auction.searchId,
-          selectedBidId: bidId,
+          bidId: bidId,
+          adType: adType,
+          query: query // 실제 검색어도 함께 전달
         }),
       })
 
-      const auctionData = await auctionResponse.json()
+      const trackData = await trackResponse.json()
 
-      if (auctionData.success) {
+      if (trackData.success) {
         setSelectedBid(bidId)
-        const rewardAmount = auctionData.data.rewardAmount
+        const rewardAmount = trackData.data.rewardAmount
+        const finalUrl = trackData.data.finalUrl
 
-        // 2. 보상 지급 처리 (거래 내역에 추가)
-        const selectedBid = auction.bids.find(bid => bid.id === bidId)
-        console.log('Selected bid info:', {
-          selectedBid,
-          auctionQuery: auction.query,
-          buyerName: selectedBid?.buyerName
-        });
+        console.log(`✅ [STEP 3] Click tracked successfully: ${rewardAmount}원 reward, redirecting to: ${finalUrl}`)
 
-        const rewardResponse = await fetch('/api/reward', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token && { 'Authorization': `Bearer ${token}` }),
-          },
-          body: JSON.stringify({
-            bidId: bidId,
-            amount: rewardAmount,
-            query: auction.query,
-            buyerName: selectedBid?.buyerName || 'Unknown Buyer'
-          }),
-        })
+        // 보상 지급 알림
+        showNotification('success', `보상 ${rewardAmount}원이 지급되었습니다!`)
 
-        const rewardData = await rewardResponse.json()
+        // 대시보드 데이터 갱신 이벤트 발생 (일일 제출 한도 차감됨)
+        window.dispatchEvent(new CustomEvent('stats-updated'))
+        window.dispatchEvent(new CustomEvent('submission-updated'))
 
-        if (rewardData.success) {
-          showNotification('success', `1차 보상 지급 완료! ${rewardAmount.toLocaleString()}원이 지급되었습니다. 대시보드에서 2차 보상을 신청할 수 있습니다.`)
+        // 최종 광고 URL로 리디렉션
+        setTimeout(() => {
+          window.open(finalUrl, '_blank')
+        }, 1000)
 
-          // 대시보드 업데이트 이벤트 발생
-          window.dispatchEvent(new CustomEvent('reward-updated'))
-          window.dispatchEvent(new CustomEvent('stats-updated'))
-        } else {
-          showNotification('error', '보상 지급에 실패했습니다.')
-        }
       } else {
-        showNotification('error', auctionData.error || '입찰 선택에 실패했습니다.')
+        console.error('Track click failed:', trackData.error)
+        showNotification('error', trackData.error || '광고 클릭 처리에 실패했습니다.')
       }
     } catch (error) {
-      console.error('Bid selection error:', error)
-      showNotification('error', '입찰 선택 중 오류가 발생했습니다.')
+      console.error('Ad click error:', error)
+      if (error instanceof Error && error.message.includes('로그인이 만료')) {
+        showNotification('error', '로그인이 만료되었습니다. 다시 로그인해주세요.')
+        handleTokenExpiry()
+      } else {
+        showNotification('error', '광고 클릭 처리 중 오류가 발생했습니다.')
+      }
     } finally {
       setIsLoading(false)
     }

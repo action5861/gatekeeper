@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS bids (
     price INTEGER NOT NULL,
     bonus_description TEXT,
     landing_url TEXT,
+    type VARCHAR(20) DEFAULT 'ADVERTISER' CHECK (type IN ('ADVERTISER', 'PLATFORM')),
+    user_id INTEGER REFERENCES users(id),
+    dest_url TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -66,10 +69,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     id VARCHAR(100) PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
     auction_id INTEGER REFERENCES auctions(id),
+    bid_id VARCHAR(100),
+    advertiser_id INTEGER REFERENCES advertisers(id),
     query_text VARCHAR(500) NOT NULL,
     buyer_name VARCHAR(100) NOT NULL,
     primary_reward DECIMAL(10,2) NOT NULL,
     secondary_reward DECIMAL(10,2),
+    amount DECIMAL(10,2),
+    source VARCHAR(20) DEFAULT 'ADVERTISER' CHECK (source IN ('ADVERTISER', 'PLATFORM')),
+    reason VARCHAR(100),
     status VARCHAR(20) DEFAULT '1차 완료',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -116,6 +124,9 @@ CREATE INDEX IF NOT EXISTS idx_auctions_search_id ON auctions(search_id);
 CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_created ON transactions(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_transactions_bid ON transactions(bid_id);
+CREATE INDEX IF NOT EXISTS idx_bids_user ON bids(user_id);
 CREATE INDEX IF NOT EXISTS idx_verification_status ON verification_requests(verification_status);
 CREATE INDEX IF NOT EXISTS idx_daily_submissions_user_date ON daily_submissions(user_id, submission_date);
 

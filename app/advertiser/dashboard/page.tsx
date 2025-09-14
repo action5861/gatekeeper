@@ -40,9 +40,16 @@ interface DashboardData {
         minQualityScore: number
         remainingBudget: number
     }
+    advertiserInfo?: {
+        company_name: string
+        website_url: string
+        daily_budget: number
+    }
 }
 
 export default function AdvertiserDashboard() {
+    console.log('AdvertiserDashboard component rendered')
+
     const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
     const [isLoading, setIsLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
@@ -52,36 +59,63 @@ export default function AdvertiserDashboard() {
 
     const fetchDashboardData = async () => {
         try {
+            console.log('Starting fetchDashboardData...')
             const token = localStorage.getItem('token')
+            console.log('Token found:', !!token)
+            console.log('Token value:', token ? token.substring(0, 50) + '...' : 'null')
+
             if (!token) {
+                console.log('No token found, redirecting to login')
                 router.push('/login')
                 return
             }
 
+            console.log('Making API call to /api/advertiser/dashboard')
             const response = await fetch('/api/advertiser/dashboard', {
                 headers: {
                     'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
                 },
             })
 
+            console.log('API response status:', response.status)
+            console.log('API response ok:', response.ok)
+            console.log('API response headers:', Object.fromEntries(response.headers.entries()))
+
             if (!response.ok) {
                 if (response.status === 401) {
+                    console.log('401 Unauthorized, redirecting to login')
                     localStorage.removeItem('token')
                     localStorage.removeItem('userType')
                     router.push('/login')
                     return
                 }
-                throw new Error('Failed to fetch dashboard data')
+                const errorText = await response.text()
+                console.error('API error response:', errorText)
+                throw new Error(`Failed to fetch dashboard data: ${response.status}`)
             }
 
             const data = await response.json()
+            console.log('Dashboard data received:', data) // 디버깅용 로그
+            console.log('AdvertiserInfo in data:', data.advertiserInfo)
+            console.log('Full API response keys:', Object.keys(data))
+
+            // advertiserInfo가 없는 경우 경고 로그
+            if (!data.advertiserInfo) {
+                console.error('❌ advertiserInfo is missing from API response!')
+                console.error('Available keys:', Object.keys(data))
+            } else {
+                console.log('✅ advertiserInfo found:', data.advertiserInfo)
+            }
+
             setDashboardData(data)
 
             // 심사 상태에 따라 대시보드 표시 여부 결정
-            if (data.review_status === 'approved') {
-                setShowDashboard(true)
-            }
+            // API 응답에 review_status가 없으므로 기본적으로 대시보드 표시
+            console.log('Setting showDashboard to true')
+            setShowDashboard(true)
         } catch (err) {
+            console.error('fetchDashboardData error:', err)
             setError(err instanceof Error ? err.message : 'An error occurred')
         } finally {
             setIsLoading(false)
@@ -89,6 +123,7 @@ export default function AdvertiserDashboard() {
     }
 
     useEffect(() => {
+        console.log('useEffect triggered, calling fetchDashboardData')
         fetchDashboardData()
     }, [])
 
@@ -102,6 +137,7 @@ export default function AdvertiserDashboard() {
     }
 
     if (isLoading) {
+        console.log('Rendering loading state')
         return (
             <div className="min-h-screen bg-slate-900">
                 <Header />
@@ -115,6 +151,7 @@ export default function AdvertiserDashboard() {
     }
 
     if (error) {
+        console.log('Rendering error state:', error)
         return (
             <div className="min-h-screen bg-slate-900">
                 <Header />
@@ -126,6 +163,8 @@ export default function AdvertiserDashboard() {
             </div>
         )
     }
+
+    console.log('Rendering main dashboard, showDashboard:', showDashboard, 'dashboardData:', dashboardData)
 
     return (
         <div className="min-h-screen bg-slate-900">
@@ -168,7 +207,13 @@ export default function AdvertiserDashboard() {
 
                         {/* Account Settings */}
                         <div className="mt-8 animate-fadeInUp animation-delay-600">
-                            <AccountSettings />
+                            <AccountSettings
+                                initialSettings={{
+                                    companyName: dashboardData?.advertiserInfo?.company_name || '',
+                                    websiteUrl: dashboardData?.advertiserInfo?.website_url || '',
+                                    dailyBudget: dashboardData?.advertiserInfo?.daily_budget || 10000,
+                                }}
+                            />
                         </div>
 
                         {/* Additional Stats */}

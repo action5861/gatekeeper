@@ -47,17 +47,19 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
                 return
             }
 
-            // Fallback to localStorage
-            const selectedUserType = localStorage.getItem('selectedUserType')
-            console.log('AuthForm: Checking for selectedUserType:', selectedUserType)
-            if (selectedUserType === 'user' || selectedUserType === 'advertiser') {
-                console.log('AuthForm: Setting userType to:', selectedUserType)
-                setUserType(selectedUserType)
-                // Clear the stored selection after using it
-                localStorage.removeItem('selectedUserType')
+            // Fallback to localStorage (only for register mode to avoid auto-login)
+            if (mode === 'register') {
+                const selectedUserType = localStorage.getItem('selectedUserType')
+                console.log('AuthForm: Checking for selectedUserType:', selectedUserType)
+                if (selectedUserType === 'user' || selectedUserType === 'advertiser') {
+                    console.log('AuthForm: Setting userType to:', selectedUserType)
+                    setUserType(selectedUserType)
+                    // Clear the stored selection after using it
+                    localStorage.removeItem('selectedUserType')
+                }
             }
         }
-    }, [])
+    }, [mode])
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -87,6 +89,9 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
         }
 
         try {
+            console.log('AuthForm handleSubmit - password value:', password)
+            console.log('AuthForm handleSubmit - password length:', password.length)
+
             const formData: AuthFormData = {
                 userType,
                 email: email.trim(),
@@ -97,13 +102,29 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
 
             console.log('Submitting form data:', { userType: formData.userType, email: formData.email, mode })
             console.log('Full form data:', formData)
+            console.log('Password in formData:', !!formData.password, formData.password ? '[REDACTED]' : 'undefined')
             console.log('Username value:', username)
             console.log('Username trimmed:', username.trim())
 
             await onSubmit(formData)
         } catch (err) {
             console.error('Form submission error:', err)
-            setError(err instanceof Error ? err.message : 'An error occurred')
+            let errorMessage = 'An error occurred'
+            if (err instanceof Error) {
+                errorMessage = err.message
+            } else if (typeof err === 'string') {
+                errorMessage = err
+            } else if (err && typeof err === 'object') {
+                // Handle object errors properly
+                if ('message' in err) {
+                    errorMessage = String(err.message)
+                } else if ('detail' in err) {
+                    errorMessage = String(err.detail)
+                } else {
+                    errorMessage = JSON.stringify(err)
+                }
+            }
+            setError(errorMessage)
         }
     }
 
@@ -122,10 +143,77 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
 
             console.log('Submitting advertiser form data with business setup:', formData)
 
-            await onSubmit(formData)
+            // 회원가입 모드일 때만 onSubmit 호출, 그렇지 않으면 직접 API 호출
+            if (mode === 'register') {
+                await onSubmit(formData)
+            } else {
+                // 로그인 모드에서 Business Setup이 완료된 경우 직접 회원가입 API 호출
+                const response = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                    },
+                    body: JSON.stringify(formData),
+                })
+
+                if (!response.ok) {
+                    let errorMessage = `Error: ${response.status} ${response.statusText}`;
+                    try {
+                        const errorData = await response.json();
+                        if (errorData.detail) {
+                            if (typeof errorData.detail === 'object' && !Array.isArray(errorData.detail)) {
+                                const fieldErrors = Object.entries(errorData.detail)
+                                    .map(([field, errors]) => `${field}: ${Array.isArray(errors) ? errors.join(', ') : errors}`)
+                                    .join('; ');
+                                errorMessage += `\nDetails: ${fieldErrors}`;
+                            } else if (Array.isArray(errorData.detail)) {
+                                const validationErrors = errorData.detail.map((err: any) =>
+                                    `${err.loc?.join('.') || 'field'}: ${err.msg || err.message || 'validation error'}`
+                                ).join(', ');
+                                errorMessage += `\nDetails: ${validationErrors}`;
+                            } else {
+                                errorMessage += `\nDetails: ${errorData.detail}`;
+                            }
+                        }
+                    } catch (parseError) {
+                        errorMessage += '\nCould not parse error response body.';
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                const result = await response.json()
+
+                // 광고주인 경우 심사 상태 메시지 표시
+                if (formData.userType === 'advertiser' && result.review_message) {
+                    alert(`${result.message}\n\n${result.review_message}`)
+                } else {
+                    alert('회원가입이 완료되었습니다. 로그인해주세요.')
+                }
+
+                // 회원가입 완료 후 자동 로그인 방지를 위해 localStorage 정리
+                localStorage.removeItem('selectedUserType')
+                // 로그인 페이지로 리다이렉트
+                window.location.href = '/login'
+            }
         } catch (err) {
             console.error('Form submission error:', err)
-            setError(err instanceof Error ? err.message : 'An error occurred')
+            let errorMessage = 'An error occurred'
+            if (err instanceof Error) {
+                errorMessage = err.message
+            } else if (typeof err === 'string') {
+                errorMessage = err
+            } else if (err && typeof err === 'object') {
+                // Handle object errors properly
+                if ('message' in err) {
+                    errorMessage = String(err.message)
+                } else if ('detail' in err) {
+                    errorMessage = String(err.detail)
+                } else {
+                    errorMessage = JSON.stringify(err)
+                }
+            }
+            setError(errorMessage)
         }
     }
 

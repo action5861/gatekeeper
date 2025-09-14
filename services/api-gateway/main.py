@@ -319,6 +319,19 @@ async def get_user_dashboard(request: Request):
     )
 
 
+@app.post("/api/user/earnings", dependencies=[Depends(verify_token)])
+async def update_user_earnings(request: Request):
+    body = await request.json()
+    return await proxy_request(
+        "user",
+        "/api/user/earnings",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
+    )
+
+
 # 광고주 서비스
 @app.post("/api/advertiser/register")
 async def register_advertiser(request: Request):
@@ -364,6 +377,28 @@ async def get_auction_status(search_id: str, request: Request):
     )
 
 
+@app.get("/api/auction/search/{search_id}", dependencies=[Depends(verify_token)])
+async def get_search_query(search_id: str, request: Request):
+    return await proxy_request(
+        "auction", f"/search/{search_id}", "GET", auth_required=True, request=request
+    )
+
+
+@app.post("/api/auction/select", dependencies=[Depends(verify_token)])
+async def select_bid(request: Request):
+    body = await request.json()
+    return await proxy_request(
+        "auction", "/select", "POST", data=body, auth_required=True, request=request
+    )
+
+
+@app.get("/api/auction/bid/{bid_id}", dependencies=[Depends(verify_token)])
+async def get_bid_info(bid_id: str, request: Request):
+    return await proxy_request(
+        "auction", f"/bid/{bid_id}", "GET", auth_required=True, request=request
+    )
+
+
 # 결제 서비스
 @app.post("/api/payment/reward", dependencies=[Depends(verify_token)])
 async def process_reward(request: Request):
@@ -371,6 +406,71 @@ async def process_reward(request: Request):
     return await proxy_request(
         "payment", "/reward", "POST", data=body, auth_required=True, request=request
     )
+
+
+@app.get("/api/redirect/{bid_id}")
+async def redirect_click(bid_id: str, request: Request, sig: str):
+    """
+    클릭 리다이렉트 엔드포인트 - 검증 → 적립 → 302 리다이렉트
+    """
+    from fastapi.responses import RedirectResponse
+    import httpx
+    import os
+
+    logger.info(f"🔄 Redirect click received for bid_id: {bid_id}, sig: {sig}")
+
+    try:
+        # 1) 검증 서비스에서 클릭 검증
+        verify_url = f"{SERVICE_URLS['verification']}/verify-click"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            verify_response = await client.post(
+                verify_url, json={"bidId": bid_id, "sig": sig}
+            )
+
+        if verify_response.status_code != 200:
+            logger.error(f"Click verification failed: {verify_response.status_code}")
+            raise HTTPException(status_code=400, detail="Invalid click")
+
+        verify_data = verify_response.json()
+        logger.info(f"✅ Click verified: {verify_data}")
+
+        # 2) 적립 처리 (payment 서비스)
+        award_url = f"{SERVICE_URLS['payment']}/award"
+        try:
+            auth = request.headers.get("Authorization")
+            headers = {"Authorization": auth} if auth else None
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                award_response = await client.post(
+                    award_url,
+                    json={
+                        "userId": verify_data["userId"],
+                        "bidId": bid_id,
+                        "type": verify_data["type"],
+                        "amount": verify_data["payout"],
+                        "reason": "click",
+                    },
+                    headers=headers,
+                )
+
+            if award_response.status_code == 200:
+                logger.info(f"✅ Award successful: {award_response.json()}")
+            else:
+                logger.error(f"Award failed: {award_response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Award failed: {e}")
+            # 적립 실패해도 리다이렉트는 진행 (UX 보장)
+
+        # 3) 최종 이동
+        destination = verify_data["destination"]
+        logger.info(f"🔄 Redirecting to: {destination}")
+        return RedirectResponse(url=destination, status_code=302)
+
+    except Exception as e:
+        logger.exception(f"Redirect error: {e}")
+        # 오류 발생 시 기본 URL로 리다이렉트
+        return RedirectResponse(url="https://www.google.com", status_code=302)
 
 
 # 품질 서비스
@@ -393,6 +493,15 @@ async def evaluate_quality(request: Request):
     body = await request.json()
     return await proxy_request(
         "analysis", "/evaluate", "POST", data=body, auth_required=True, request=request
+    )
+
+
+# 품질 평가 전용 엔드포인트 (인증 없음)
+@app.post("/api/analysis/evaluate-quality")
+async def evaluate_quality_no_auth(request: Request):
+    body = await request.json()
+    return await proxy_request(
+        "analysis", "/evaluate", "POST", data=body, auth_required=False, request=request
     )
 
 

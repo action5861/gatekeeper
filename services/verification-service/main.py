@@ -9,6 +9,11 @@ from database import (
     connect_to_database,
     disconnect_from_database,
 )
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils.sign import verify_sig
 
 app = FastAPI(title="Verification Service", version="1.0.0")
 
@@ -55,6 +60,18 @@ class ClaimRequest(BaseModel):
 class ClaimResponse(BaseModel):
     status: str
     secondaryReward: Optional[int] = None
+
+
+class VerifyClickRequest(BaseModel):
+    bidId: str
+    sig: str
+
+
+class VerifyClickResponse(BaseModel):
+    userId: int
+    type: str
+    payout: int
+    destination: str
 
 
 # OCR 및 외부 API 연동을 통한 검증 과정을 시뮬레이션
@@ -239,6 +256,42 @@ async def claim_reward(transactionId: str = Form(...), proof: UploadFile = File(
         raise HTTPException(
             status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
         )
+
+
+@app.post("/verify-click", response_model=VerifyClickResponse)
+async def verify_click(request: VerifyClickRequest):
+    """클릭 검증 및 컨텍스트 반환"""
+    try:
+        # 1. DB에서 입찰 정보 조회
+        bid_query = """
+            SELECT id, user_id, type, price, dest_url, landing_url
+            FROM bids 
+            WHERE id = :bid_id
+        """
+        bid = await database.fetch_one(bid_query, {"bid_id": request.bidId})
+
+        if not bid:
+            raise HTTPException(status_code=400, detail="Unknown bid")
+
+        # 2. 타입과 지급액 결정
+        bid_type = "PLATFORM" if bid["type"] == "PLATFORM" else "ADVERTISER"
+        payout = 200 if bid_type == "PLATFORM" else int(bid["price"])
+
+        # 3. 서명 검증
+        if not verify_sig(bid["id"], payout, bid_type, request.sig):
+            raise HTTPException(status_code=400, detail="Bad signature")
+
+        # 4. 응답 반환
+        return VerifyClickResponse(
+            userId=bid["user_id"],
+            type=bid_type,
+            payout=payout,
+            destination=bid["dest_url"] or bid["landing_url"],
+        )
+
+    except Exception as e:
+        print(f"❌ Click verification error: {e}")
+        raise HTTPException(status_code=500, detail=f"Verification error: {str(e)}")
 
 
 @app.get("/health")

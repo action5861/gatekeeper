@@ -1,7 +1,7 @@
 'use client'
 
 import { DollarSign, Globe, Save, Settings } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface AccountSettingsProps {
     initialSettings?: {
@@ -12,6 +12,8 @@ interface AccountSettingsProps {
 }
 
 export default function AccountSettings({ initialSettings }: AccountSettingsProps) {
+    console.log('AccountSettings initialSettings:', initialSettings) // 디버깅용 로그
+
     const [settings, setSettings] = useState({
         websiteUrl: initialSettings?.websiteUrl || '',
         dailyBudget: initialSettings?.dailyBudget || 10000,
@@ -20,15 +22,52 @@ export default function AccountSettings({ initialSettings }: AccountSettingsProp
     const [isEditing, setIsEditing] = useState(false)
     const [isSaving, setIsSaving] = useState(false)
 
+    // initialSettings가 변경될 때마다 상태 업데이트
+    useEffect(() => {
+        if (initialSettings) {
+            setSettings({
+                websiteUrl: initialSettings.websiteUrl || '',
+                dailyBudget: initialSettings.dailyBudget || 10000,
+                companyName: initialSettings.companyName || '',
+            })
+        }
+    }, [initialSettings])
+
     const handleSave = async () => {
         setIsSaving(true)
         try {
-            // Simulate API call
-            await new Promise(resolve => setTimeout(resolve, 1000))
+            const token = localStorage.getItem('token')
+            if (!token) {
+                throw new Error('No authentication token found')
+            }
+
+            const response = await fetch('/api/advertiser/update-account-info', {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    companyName: settings.companyName,
+                    websiteUrl: settings.websiteUrl,
+                    dailyBudget: settings.dailyBudget,
+                }),
+            })
+
+            if (!response.ok) {
+                const errorData = await response.json()
+                throw new Error(errorData.message || 'Failed to save settings')
+            }
+
+            const result = await response.json()
             setIsEditing(false)
-            // Here you would typically make an API call to save the settings
+            alert('계정 정보가 성공적으로 저장되었습니다!')
+
+            // 페이지 새로고침으로 최신 데이터 반영
+            window.location.reload()
         } catch (error) {
             console.error('Failed to save settings:', error)
+            alert(`설정 저장에 실패했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`)
         } finally {
             setIsSaving(false)
         }

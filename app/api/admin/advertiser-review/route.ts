@@ -4,7 +4,13 @@ import { NextRequest, NextResponse } from 'next/server'
 // 심사 대기 목록 조회
 export async function GET(request: NextRequest) {
     try {
-        await requireAdminAuth(request)
+        console.log('=== GET /api/admin/advertiser-review ===')
+        console.log('Request headers:', Object.fromEntries(request.headers.entries()))
+        console.log('Request URL:', request.url)
+        console.log('Request method:', request.method)
+
+        const admin = await requireAdminAuth(request)
+        console.log('Admin authenticated:', admin.username)
 
         const { searchParams } = new URL(request.url)
         const status = searchParams.get('status')
@@ -15,6 +21,7 @@ export async function GET(request: NextRequest) {
 
         const advertiserServiceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
 
+        // 실제 광고주 서비스 엔드포인트 사용
         let endpoint = '/admin/pending-reviews'
         if (status === 'rejected') {
             endpoint = '/admin/rejected-advertisers'
@@ -25,7 +32,16 @@ export async function GET(request: NextRequest) {
         const fullUrl = `${advertiserServiceUrl}${endpoint}`
         console.log('전체 요청 URL:', fullUrl)
 
-        const response = await fetch(fullUrl)
+        // Authorization 헤더를 광고주 서비스로 전달
+        const authHeader = request.headers.get('authorization')
+        console.log('전달할 Authorization 헤더:', authHeader)
+
+        const response = await fetch(fullUrl, {
+            headers: {
+                'Authorization': authHeader || '',
+                'Content-Type': 'application/json'
+            }
+        })
 
         console.log('응답 상태:', response.status)
 
@@ -74,9 +90,10 @@ export async function GET(request: NextRequest) {
     } catch (error) {
         console.error('Error fetching advertisers:', error)
         if (error instanceof Error && error.message.includes('Unauthorized')) {
+            console.log('Returning 403 Forbidden due to unauthorized access')
             return NextResponse.json(
                 { error: 'Unauthorized: Admin access required' },
-                { status: 401 }
+                { status: 403 }
             )
         }
         return NextResponse.json(
@@ -102,8 +119,16 @@ export async function PUT(request: NextRequest) {
         qs.set('recommended_bid_min', String(recommended_bid_min))
         qs.set('recommended_bid_max', String(recommended_bid_max))
 
+        // Authorization 헤더를 광고주 서비스로 전달
+        const authHeader = request.headers.get('authorization')
+        console.log('PUT 요청 - 전달할 Authorization 헤더:', authHeader)
+
         const response = await fetch(`${advertiserServiceUrl}/admin/update-review?${qs.toString()}`, {
             method: 'PUT',
+            headers: {
+                'Authorization': authHeader || '',
+                'Content-Type': 'application/json'
+            }
         })
 
         if (!response.ok) {
@@ -158,8 +183,16 @@ export async function PATCH(request: NextRequest) {
             ; (keywords || []).forEach((k) => qs.append('keywords', String(k)))
         categoryPaths.forEach((p) => qs.append('categories', p))
 
+        // Authorization 헤더를 광고주 서비스로 전달
+        const authHeader = request.headers.get('authorization')
+        console.log('PATCH 요청 - 전달할 Authorization 헤더:', authHeader)
+
         const response = await fetch(`${advertiserServiceUrl}/admin/update-advertiser-data?${qs.toString()}`, {
             method: 'PATCH',
+            headers: {
+                'Authorization': authHeader || '',
+                'Content-Type': 'application/json'
+            }
         })
 
         if (!response.ok) {

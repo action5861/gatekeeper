@@ -12,14 +12,28 @@ export default function LoginPage() {
         setIsLoading(true)
 
         try {
-            console.log('Attempting login with data:', { userType: data.userType, email: data.email })
+            console.log('handleLogin received data:', data)
+            console.log('Password in received data:', !!data.password, data.password ? '[REDACTED]' : 'undefined')
+            console.log('Attempting login with data:', { userType: data.userType, email: data.email, hasPassword: !!data.password })
+
+            // 데이터 검증 및 보정
+            const requestData = {
+                userType: data.userType,
+                email: data.email,
+                password: data.password || '', // password가 없으면 빈 문자열로 설정
+            }
+
+            console.log('>>> DEBUG: 최종적으로 API에 보내는 데이터:', requestData)
+
+            const requestBody = JSON.stringify(requestData)
+            console.log('API request body:', requestBody)
 
             const response = await fetch('/api/auth/login', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify(data),
+                body: requestBody,
             })
 
             const result = await response.json()
@@ -37,7 +51,10 @@ export default function LoginPage() {
             localStorage.setItem('token', result.access_token)
             localStorage.setItem('userType', result.userType || data.userType)
 
-            console.log('Login successful, redirecting to:', result.userType === 'advertiser' ? '/advertiser/dashboard' : '/dashboard')
+            console.log('✅ Login successful!')
+            console.log('🔑 Token stored:', result.access_token ? 'YES' : 'NO')
+            console.log('👤 UserType stored:', result.userType || data.userType)
+            console.log('📍 Redirecting to:', result.userType === 'advertiser' ? '/advertiser/dashboard' : '/dashboard')
 
             // Redirect based on user type from backend response
             if (result.userType === 'advertiser' || data.userType === 'advertiser') {

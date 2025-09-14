@@ -2,10 +2,10 @@
 
 'use client'
 
-import { Auction, Bid } from '@/lib/types'
+import { authenticatedFetch } from '@/lib/auth'
+import { Auction } from '@/lib/types'
 import { Award, Clock, DollarSign, TrendingUp, Users } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import RewardModal from '../ui/RewardModal'
 
 interface AuctionStatusProps {
   auction: Auction | null
@@ -15,10 +15,6 @@ interface AuctionStatusProps {
 export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusProps) {
   const [timeLeft, setTimeLeft] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
-  const [rewardLoading, setRewardLoading] = useState<string | null>(null)
-  const [rewardMessage, setRewardMessage] = useState<string | null>(null)
-  const [showRewardModal, setShowRewardModal] = useState(false)
-  const [rewardAmount, setRewardAmount] = useState(0)
 
   // 남은 시간 계산
   useEffect(() => {
@@ -50,11 +46,8 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
     setIsLoading(true)
     try {
-      const response = await fetch('/api/auction/select', {
+      const response = await authenticatedFetch('/api/auction/select', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           searchId: auction.searchId,
           selectedBidId: bidId,
@@ -77,48 +70,28 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
     }
   }
 
-  const handleVisitWithReward = async (bid: Bid) => {
-    setRewardLoading(bid.id)
+  const handleBidClick = (bid: any) => {
+    console.log(`[FRONTEND] handleBidClick called with bid:`, bid);
 
-    try {
-      const token = localStorage.getItem('token')
-      const response = await fetch('/api/reward', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token && { 'Authorization': `Bearer ${token}` }),
-        },
-        body: JSON.stringify({
-          bidId: bid.id,
-          amount: bid.price,
-          query: auction?.query || 'Unknown Search',
-          buyerName: bid.buyerName || 'Unknown Buyer'
-        }),
-      })
-
-      const result = await response.json()
-
-      if (result.success) {
-        // 성공 시 모달 표시
-        setRewardAmount(bid.price)
-        setShowRewardModal(true)
-
-        // 대시보드 업데이트 이벤트 발생
-        window.dispatchEvent(new CustomEvent('reward-updated', {
-          detail: { amount: bid.price }
-        }))
-
-        // 새 탭에서 사이트 열기
-        window.open(bid.landingUrl, '_blank', 'noopener,noreferrer')
-      } else {
-        setRewardMessage(`❌ ${result.message}`)
-        setTimeout(() => setRewardMessage(null), 3000)
+    // Step 3: 새로운 track-click API를 사용하여 클릭 처리
+    if (onBidSelect) {
+      console.log(`[FRONTEND] Calling onBidSelect with bidId: ${bid.id}`);
+      onBidSelect(bid.id);
+    } else {
+      console.warn(`[FRONTEND] No onBidSelect handler, falling back to direct URL`);
+      // Fallback: 직접 URL 열기
+      try {
+        if (bid.clickUrl) {
+          console.log(`[FRONTEND] Using clickUrl: ${bid.clickUrl}`);
+          window.open(bid.clickUrl, '_blank');
+        } else {
+          console.warn(`[FRONTEND] No clickUrl found for bid ${bid.id}, falling back to landingUrl`);
+          window.open(bid.landingUrl, '_blank');
+        }
+      } catch (error) {
+        console.error("클릭 처리 중 오류 발생:", error);
+        alert("링크를 여는 데 실패했습니다. 다시 시도해주세요.");
       }
-    } catch (error) {
-      setRewardMessage('❌ 보상 지급 중 오류가 발생했습니다.')
-      setTimeout(() => setRewardMessage(null), 3000)
-    } finally {
-      setRewardLoading(null)
     }
   }
 
@@ -173,27 +146,9 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
         </div>
       </div>
 
-      {/* Reward Message */}
-      {rewardMessage && (
-        <div className={`mb-4 p-4 rounded-lg ${rewardMessage.includes('🎉')
-            ? 'bg-green-500/20 border border-green-500/50 text-green-300'
-            : 'bg-red-500/20 border border-red-500/50 text-red-300'
-          }`}>
-          {rewardMessage}
-        </div>
-      )}
-
       {/* Bids List */}
       <div className="space-y-3">
         <h4 className="text-lg font-semibold text-slate-100 mb-4">Current Bids</h4>
-
-        {/* Reward Modal */}
-        <RewardModal
-          isOpen={showRewardModal}
-          onClose={() => setShowRewardModal(false)}
-          amount={rewardAmount}
-          message={`1차로 ${rewardAmount}원 즉시보상이 지급되었습니다!`}
-        />
 
         {auction.bids.length === 0 ? (
           <div className="text-center py-8">
@@ -205,16 +160,16 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
             <div
               key={bid.id}
               className={`bg-slate-700/30 rounded-lg p-4 border transition-all duration-200 ${index === 0
-                  ? 'border-yellow-500/50 bg-yellow-500/10'
-                  : 'border-slate-600 hover:border-slate-500'
+                ? 'border-yellow-500/50 bg-yellow-500/10'
+                : 'border-slate-600 hover:border-slate-500'
                 }`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <div className="flex items-center space-x-3 mb-2">
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${index === 0
-                        ? 'bg-yellow-500 text-yellow-900'
-                        : 'bg-slate-600 text-slate-300'
+                      ? 'bg-yellow-500 text-yellow-900'
+                      : 'bg-slate-600 text-slate-300'
                       }`}>
                       #{index + 1}
                     </div>
@@ -235,23 +190,13 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                 </div>
 
                 <button
-                  onClick={() => handleVisitWithReward(bid)}
-                  disabled={rewardLoading === bid.id}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 text-white rounded-lg transition-colors duration-200 flex items-center space-x-2 disabled:cursor-not-allowed whitespace-nowrap"
+                  onClick={() => handleBidClick(bid)}
+                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200 flex items-center space-x-2 whitespace-nowrap"
                 >
-                  {rewardLoading === bid.id ? (
-                    <>
-                      <span>Processing...</span>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    </>
-                  ) : (
-                    <>
-                      <span>Visit & Get {bid.price}원</span>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                      </svg>
-                    </>
-                  )}
+                  <span>Visit & Get {bid.price}원</span>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
                 </button>
               </div>
             </div>

@@ -1,4 +1,5 @@
-// 검색어 수신, 가치 평가 및 역경매 개시 (API Gateway를 통한 프록시)
+// Step 2: 광고 검색 API (검색 버튼 클릭 시)
+// 일일 제출 한도 차감 없음, 광고 결과만 반환
 
 import { ApiResponse } from '@/lib/types';
 import { NextRequest, NextResponse } from 'next/server';
@@ -8,7 +9,7 @@ const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:8000';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { query } = body;
+    const { query, qualityScore } = body;
 
     // 사용자 인증 확인
     const authHeader = request.headers.get('authorization');
@@ -35,26 +36,18 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    // API Gateway를 통해 검색 처리
-    const gatewayResponse = await fetch(`${API_GATEWAY_URL}/api/analysis/evaluate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': authHeader,
-      },
-      body: JSON.stringify({ query: query.trim() }),
-    });
 
-    if (!gatewayResponse.ok) {
-      const errorData = await gatewayResponse.json();
-      throw new Error(errorData.detail || 'Analysis service error');
+    // 품질 점수 유효성 검사
+    if (!qualityScore || typeof qualityScore !== 'number' || qualityScore < 0 || qualityScore > 100) {
+      return NextResponse.json<ApiResponse<null>>({
+        success: false,
+        error: '품질 점수가 필요합니다. 먼저 검색어를 입력해주세요.'
+      }, { status: 400 });
     }
 
-    const analysisData = await gatewayResponse.json();
-    const qualityReport = analysisData.data;
 
-    // API Gateway를 통해 경매 시작
-    console.log('Calling auction service via API Gateway with:', { query: query.trim(), valueScore: qualityReport.score });
+    // API Gateway를 통해 광고 검색 시작
+    console.log('Calling auction service via API Gateway with:', { query: query.trim(), valueScore: qualityScore });
     const auctionResponse = await fetch(`${API_GATEWAY_URL}/api/auction/start`, {
       method: 'POST',
       headers: {
@@ -63,7 +56,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         query: query.trim(),
-        valueScore: qualityReport.score
+        valueScore: qualityScore
       }),
     });
 
@@ -77,36 +70,13 @@ export async function POST(request: NextRequest) {
     const auctionData = await auctionResponse.json();
     const auction = auctionData.data;
 
-    // API Gateway를 통해 사용자 서비스에 검색 데이터 저장
-    try {
-      const userServiceResponse = await fetch(`${API_GATEWAY_URL}/api/user/update-daily-submission`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': authHeader,
-        },
-        body: JSON.stringify({
-          quality_score: qualityReport.score
-        }),
-      });
-
-      if (userServiceResponse.ok) {
-        console.log('✅ Search data saved to user service via API Gateway');
-      } else {
-        console.warn('⚠️ Failed to save search data to user service');
-      }
-    } catch (error) {
-      console.warn('⚠️ User service error (non-critical):', error);
-    }
-
-    // 성공 응답
-    return NextResponse.json<ApiResponse<{ auction: any; qualityReport: any }>>({
+    // 성공 응답 - 광고 결과만 반환
+    return NextResponse.json<ApiResponse<{ auction: any }>>({
       success: true,
       data: {
-        auction,
-        qualityReport
+        auction
       },
-      message: '역경매가 성공적으로 시작되었습니다.'
+      message: '광고 검색이 완료되었습니다.'
     }, { status: 200 });
 
   } catch (error) {

@@ -72,6 +72,11 @@ services:
       - "8003:8003"
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
+      - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
+      - JWT_ALG=HS256
+      - JWT_ISSUER=digisafe-api
+      - JWT_AUDIENCE=digisafe-client
+      - ACCESS_TOKEN_EXPIRE_MINUTES=30
     networks:
       - app-network
     depends_on:
@@ -100,6 +105,11 @@ services:
       - "8005:8005"
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
+      - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
+      - JWT_ALG=HS256
+      - JWT_ISSUER=digisafe-api
+      - JWT_AUDIENCE=digisafe-client
+      - ACCESS_TOKEN_EXPIRE_MINUTES=30
     networks:
       - app-network
     depends_on:
@@ -128,6 +138,11 @@ services:
       - "8007:8007"
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
+      - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
+      - JWT_ALG=HS256
+      - JWT_ISSUER=digisafe-api
+      - JWT_AUDIENCE=digisafe-client
+      - ACCESS_TOKEN_EXPIRE_MINUTES=30
     networks:
       - app-network
     depends_on:
@@ -172,6 +187,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
       - API_GATEWAY_URL=http://api-gateway:8000
       - USER_SERVICE_URL=http://user-service:8005
       - ADVERTISER_SERVICE_URL=http://advertiser-service:8007

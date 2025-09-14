@@ -7,6 +7,9 @@ import random
 import asyncio
 from decimal import Decimal
 
+# HMAC 서명 import
+from utils.sign import sign_click
+
 # Database import
 try:
     from database import (
@@ -71,6 +74,7 @@ class BidResponse(BaseModel):
     bonus: str
     timestamp: datetime
     landingUrl: str
+    clickUrl: str  # 새로 추가: 리다이렉트를 위한 서명된 URL
 
 
 class AuctionResponse(BaseModel):
@@ -362,13 +366,7 @@ async def generate_real_advertiser_bids(
 ) -> List[BidResponse]:
     """
     실제 광고주들의 자동 입찰을 생성합니다.
-
-    Args:
-        search_query (str): 검색 쿼리
-        quality_score (int): 품질 점수
-
-    Returns:
-        List[BidResponse]: 실제 광고주들의 입찰 목록
+    (수정 버전: 매칭 실패 시 플랫폼 입찰을 확실히 반환)
     """
     print(
         f"--- 검색어 '{search_query}' (품질 점수: {quality_score})에 대한 실제 광고주 매칭 시작 ---"
@@ -377,25 +375,25 @@ async def generate_real_advertiser_bids(
     # 1. 매칭되는 광고주 찾기
     matching_advertisers = await find_matching_advertisers(search_query, quality_score)
 
+    # 2. 매칭 실패 시 즉시 플랫폼 사업자 입찰 생성 및 반환
     if not matching_advertisers:
-        print(">> 매칭되는 광고주가 없습니다.")
-        return []
+        print(">> 매칭되는 광고주가 없습니다. 플랫폼 사업자 고정 적립을 제공합니다.")
+        platform_bids = generate_platform_fallback_bids(search_query, quality_score)
+        print(f">> 플랫폼 폴백 입찰 {len(platform_bids)}개 생성 완료")
 
+        # 여기서 바로 반환해야 함
+        return platform_bids
+
+    # 광고주가 있는 경우의 로직...
     print(f">> 총 {len(matching_advertisers)}명의 잠재적 광고주를 찾았습니다.")
-
     real_bids = []
 
-    # 2. 각 광고주별 입찰가 계산 및 예산 확인
+    # 3. 각 광고주별 입찰가 계산 및 예산 확인
     for advertiser in matching_advertisers:
         advertiser_id = advertiser["advertiser_id"]
         match_score = advertiser["match_score"]
 
-        # 광고주 정보 조회
-        advertiser_info_query = """
-            SELECT company_name, website_url
-            FROM advertisers
-            WHERE id = :advertiser_id
-        """
+        advertiser_info_query = "SELECT company_name, website_url FROM advertisers WHERE id = :advertiser_id"
         advertiser_info = await database.fetch_one(
             advertiser_info_query, values={"advertiser_id": advertiser_id}
         )
@@ -403,24 +401,24 @@ async def generate_real_advertiser_bids(
         if not advertiser_info:
             continue
 
-        # 입찰가 계산
         bid_price = await calculate_auto_bid_price(advertiser_id, match_score)
 
         if bid_price > 0:
-            # 예산 확인
             is_available = await check_budget_availability(advertiser_id, bid_price)
-
             if is_available:
-                # 보너스 조건 생성 (타입 변환)
                 advertiser_info_dict = dict(advertiser_info)
                 bonus_conditions = generate_bonus_conditions_for_advertiser(
                     advertiser_info_dict, match_score, quality_score
                 )
 
-                # BidResponse 생성
                 import uuid
 
                 bid_id = f"bid_real_{advertiser_id}_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+
+                # clickUrl 생성 (HMAC 서명 포함)
+                bid_type = "ADVERTISER"
+                sig = sign_click(bid_id, bid_price, bid_type)
+                click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
 
                 real_bids.append(
                     BidResponse(
@@ -431,32 +429,32 @@ async def generate_real_advertiser_bids(
                         timestamp=datetime.now(),
                         landingUrl=advertiser_info["website_url"]
                         or f"https://www.google.com/search?q={search_query}",
+                        clickUrl=click_url,
                     )
                 )
-
                 print(
-                    f"  - 광고주 {advertiser_info['company_name']}: 입찰가 {bid_price}원, 매칭 점수 {match_score:.2f}"
+                    f"   - 광고주 {advertiser_info['company_name']}: 입찰가 {bid_price}원, 매칭 점수 {match_score:.2f}"
                 )
             else:
                 print(
-                    f"  - 광고주 {advertiser_info['company_name']}: 예산 부족으로 입찰 제외"
+                    f"   - 광고주 {advertiser_info['company_name']}: 예산 부족으로 입찰 제외"
                 )
         else:
             print(
-                f"  - 광고주 {advertiser_info['company_name']}: 입찰가 0원으로 입찰 제외"
+                f"   - 광고주 {advertiser_info['company_name']}: 입찰가 0원으로 입찰 제외"
             )
 
-    # 3. 최종 입찰 결과 정렬
-    if real_bids:
-        sorted_bids = sorted(real_bids, key=lambda x: x.price, reverse=True)
-        print(f"\n--- 최종 입찰 결과: {len(sorted_bids)}개 ---")
-        for rank, bid in enumerate(sorted_bids, 1):
-            print(f"{rank}위: {bid.buyerName} (입찰가: {bid.price}원)")
+    # 유효한 입찰이 없으면 플랫폼 폴백
+    if not real_bids:
+        print(">> 유효한 입찰자가 없습니다. 플랫폼 사업자 고정 적립을 제공합니다.")
+        platform_bids = generate_platform_fallback_bids(search_query, quality_score)
+        print(f">> 플랫폼 폴백 입찰 {len(platform_bids)}개 생성 완료")
+        return platform_bids
 
-        return sorted_bids
-    else:
-        print("\n>> 최종 입찰자가 없습니다.")
-        return []
+    # 실제 입찰이 있으면 정렬해서 반환
+    sorted_bids = sorted(real_bids, key=lambda x: x.price, reverse=True)
+    print(f"--- 최종 입찰 결과: {len(sorted_bids)}개 ---")
+    return sorted_bids
 
 
 def generate_bonus_conditions_for_advertiser(
@@ -490,6 +488,64 @@ def generate_bonus_conditions_for_advertiser(
     return ", ".join(conditions) if conditions else "기본 서비스"
 
 
+def generate_platform_fallback_bids(
+    search_query: str, quality_score: int
+) -> List[BidResponse]:
+    """
+    광고주 매칭이 실패했을 때 플랫폼 사업자들이 제공하는 고정 200원 적립 입찰을 생성합니다.
+    """
+    print(">> 플랫폼 사업자 고정 적립 입찰 생성 중...")
+
+    platform_buyers = [
+        {
+            "name": "쿠팡",
+            "name_en": "coupang",
+            "url": f"https://www.coupang.com/np/search?q={search_query}",
+            "bonus": "로켓배송으로 바로 받기",
+        },
+        {
+            "name": "네이버",
+            "name_en": "naver",
+            "url": f"https://search.naver.com/search.naver?where=web&query={search_query}",
+            "bonus": "네이버쇼핑 최저가 비교",
+        },
+        {
+            "name": "구글",
+            "name_en": "google",
+            "url": f"https://www.google.com/search?q={search_query}",
+            "bonus": "가장 빠른 최신 정보",
+        },
+    ]
+
+    fallback_bids = []
+    now = datetime.now()
+
+    for i, buyer in enumerate(platform_buyers):
+        import uuid
+
+        bid_id = f"platform_bid_{buyer['name_en']}_{int(now.timestamp())}_{i}"
+
+        # clickUrl 생성 (HMAC 서명 포함)
+        bid_type = "PLATFORM"
+        sig = sign_click(bid_id, 200, bid_type)
+        click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+
+        fallback_bids.append(
+            BidResponse(
+                id=bid_id,
+                buyerName=buyer["name"],
+                price=200,  # 고정 200원 적립
+                bonus=buyer["bonus"],
+                timestamp=now,
+                landingUrl=buyer["url"],
+                clickUrl=click_url,
+            )
+        )
+
+    print(f">> {len(fallback_bids)}개의 플랫폼 사업자 고정 적립 입찰 생성 완료")
+    return fallback_bids
+
+
 def generate_bonus_conditions(buyer: dict, value_score: int) -> str:
     """기존 시뮬레이션용 보너스 조건 생성 (하위 호환성 유지)"""
     conditions = []
@@ -515,28 +571,27 @@ def generate_bonus_conditions(buyer: dict, value_score: int) -> str:
 
 
 async def start_reverse_auction(query: str, value_score: int) -> List[BidResponse]:
-    """실제 광고주 매칭 시스템과 시뮬레이션을 혼합하여 입찰 목록을 생성"""
+    """
+    역경매를 시작합니다. (수정된 버전)
+    """
+    print(f">> 역경매 시작 - 검색어: {query}, 품질점수: {value_score}")
 
-    # 1. 실제 광고주 매칭 시도
-    real_bids = await generate_real_advertiser_bids(query, value_score)
+    # 실제 광고주 매칭 시도
+    bids = await generate_real_advertiser_bids(query, value_score)
 
-    # 자동 입찰 로그 기록
-    await log_auto_bids(real_bids, query, value_score)
+    # 혹시 모를 상황에 대비한 안전장치
+    if not bids:
+        print(">> 오류: 입찰 결과가 없습니다. 강제로 플랫폼 폴백 생성")
+        bids = generate_platform_fallback_bids(query, value_score)
 
-    # 2. 실제 광고주가 충분하지 않은 경우 시뮬레이션 보완
-    if len(real_bids) < 3:
-        simulation_bids = await generate_simulation_bids(
-            query, value_score, 3 - len(real_bids)
-        )
-        real_bids.extend(simulation_bids)
+    # 자동 입찰 결과 DB에 기록
+    await log_auto_bids(bids, query, value_score)
 
-    # 3. 최소 1개는 보장
-    if not real_bids:
-        fallback_bids = await generate_fallback_bids(query, value_score)
-        real_bids.extend(fallback_bids)
+    print(f">> 최종 반환: {len(bids)}개 입찰")
+    for i, bid in enumerate(bids):
+        print(f"   {i+1}. {bid.buyerName}: {bid.price}원")
 
-    # 가격순으로 정렬 (높은 가격이 먼저)
-    return sorted(real_bids, key=lambda x: x.price, reverse=True)
+    return bids
 
 
 async def generate_simulation_bids(
@@ -549,7 +604,7 @@ async def generate_simulation_bids(
     # 플랫폼별 검색 URL 생성
     search_urls = {
         "google": f"https://www.google.com/search?q={query}",
-        "naver": f"https://search.naver.com/search.naver?query={query}",
+        "naver": f"https://search.naver.com/search.naver?where=web&query={query}",
         "coupang": f"https://www.coupang.com/np/search?q={query}",
         "amazon": f"https://www.amazon.com/s?k={query}",
         "gmarket": f"https://browse.gmarket.co.kr/search?keyword={query}",
@@ -590,6 +645,11 @@ async def generate_simulation_bids(
 
         bid_id = f"bid_sim_{int(now.timestamp())}_{i}_{uuid.uuid4().hex[:8]}"
 
+        # clickUrl 생성 (HMAC 서명 포함)
+        bid_type = "ADVERTISER"
+        sig = sign_click(bid_id, price, bid_type)
+        click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+
         bids.append(
             BidResponse(
                 id=bid_id,
@@ -598,6 +658,7 @@ async def generate_simulation_bids(
                 bonus=platform_buyer["bonus"],
                 timestamp=now,
                 landingUrl=platform_buyer["url"],
+                clickUrl=click_url,
             )
         )
 
@@ -660,14 +721,21 @@ async def generate_fallback_bids(query: str, value_score: int) -> List[BidRespon
 
     bid_id = f"bid_fallback_{int(now.timestamp())}_{uuid.uuid4().hex[:8]}"
 
+    # clickUrl 생성 (HMAC 서명 포함)
+    bid_type = "ADVERTISER"
+    price = random.randint(100, 500)
+    sig = sign_click(bid_id, price, bid_type)
+    click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+
     return [
         BidResponse(
             id=bid_id,
             buyerName="Google",
-            price=random.randint(100, 500),
+            price=price,
             bonus="기본 검색 결과",
             timestamp=now,
             landingUrl=f"https://www.google.com/search?q={query}",
+            clickUrl=click_url,
         )
     ]
 
@@ -734,9 +802,14 @@ async def start_auction(request: StartAuctionRequest):
 
         # 입찰 정보를 DB에 저장
         for bid in bids:
+            # bid_id에서 타입 추출
+            bid_type = (
+                "PLATFORM" if bid.id.startswith("platform_bid_") else "ADVERTISER"
+            )
+
             bid_query = """
-                INSERT INTO bids (id, auction_id, buyer_name, price, bonus_description, landing_url)
-                VALUES (:id, :auction_id, :buyer_name, :price, :bonus_description, :landing_url)
+                INSERT INTO bids (id, auction_id, buyer_name, price, bonus_description, landing_url, type, user_id, dest_url)
+                VALUES (:id, :auction_id, :buyer_name, :price, :bonus_description, :landing_url, :type, :user_id, :dest_url)
             """
 
             await database.execute(
@@ -748,6 +821,9 @@ async def start_auction(request: StartAuctionRequest):
                     "price": bid.price,
                     "bonus_description": bid.bonus,
                     "landing_url": bid.landingUrl,
+                    "type": bid_type,
+                    "user_id": 1,  # 하드코딩된 user_id (실제로는 JWT에서 추출)
+                    "dest_url": bid.landingUrl,
                 },
             )
 
@@ -853,6 +929,32 @@ async def get_auction_status(search_id: str):
         )
 
 
+@app.get("/bid/{bid_id}")
+async def get_bid_info(bid_id: str):
+    """특정 입찰 정보를 조회합니다."""
+    try:
+        # DB에서 입찰 정보 조회
+        bid_query = "SELECT * FROM bids WHERE id = :bid_id"
+        bid = await database.fetch_one(bid_query, {"bid_id": bid_id})
+
+        if not bid:
+            raise HTTPException(status_code=404, detail="입찰 정보를 찾을 수 없습니다.")
+
+        return {
+            "id": bid["id"],
+            "auction_id": bid["auction_id"],
+            "buyer_name": bid["buyer_name"],
+            "price": bid["price"],
+            "bonus_description": bid["bonus_description"],
+            "landing_url": bid["landing_url"],
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
+        )
+
+
 @app.get("/bids")
 async def get_recent_bids():
     """최근 입찰 내역을 반환합니다."""
@@ -948,6 +1050,23 @@ async def get_system_status():
             "error": str(e),
             "real_advertiser_matching": "disabled",
         }
+
+
+@app.get("/search/{search_id}")
+async def get_search_query(search_id: str):
+    """searchId로 검색어를 조회합니다."""
+    try:
+        query = """
+            SELECT query_text FROM auctions WHERE search_id = :search_id
+        """
+        result = await database.fetch_one(query, {"search_id": search_id})
+
+        if result:
+            return {"success": True, "query": result["query_text"]}
+        else:
+            raise HTTPException(status_code=404, detail="Search ID not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

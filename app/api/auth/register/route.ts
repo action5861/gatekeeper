@@ -1,72 +1,109 @@
+// 파일 경로: /app/api/auth/register/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 
-const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:8000';
+// 1. 백엔드 Pydantic 모델과 거의 동일한 Zod 스키마 정의
+const BusinessSetupSchema = z.object({
+    websiteUrl: z.string().url({ message: "올바른 URL 형식이 아닙니다." }).max(500),
+    keywords: z.array(z.string().max(50, { message: "키워드는 50자를 초과할 수 없습니다." })).max(100),
+    categories: z.array(z.union([z.number(), z.string()])).max(50),
+    dailyBudget: z.number().int().min(1000).max(10_000_000),
+    bidRange: z.object({
+        min: z.number().int().min(50).max(10_000),
+        max: z.number().int().min(50).max(10_000),
+    }).refine(data => data.max > data.min, {
+        message: "최대 입찰가는 최소 입찰가보다 커야 합니다.",
+        path: ["max"], // 오류가 발생한 필드를 특정
+    }),
+});
 
-export async function POST(request: NextRequest) {
+// 기본 스키마 (모든 사용자 타입에 공통)
+const BaseSchema = z.object({
+    userType: z.enum(['advertiser', 'user']),
+    email: z.string().email({ message: "올바른 이메일 형식이 아닙니다." }),
+    password: z.string().min(8, { message: "비밀번호는 8자 이상이어야 합니다." }),
+    username: z.string().min(1, { message: "사용자명은 필수입니다." }).max(50).optional(),
+});
+
+// 광고주용 스키마 (기본 + 광고주 필수 필드)
+const AdvertiserSchema = BaseSchema.extend({
+    userType: z.literal('advertiser'),
+    companyName: z.string().min(1, { message: "회사명은 필수입니다." }).max(100),
+    businessSetup: BusinessSetupSchema,
+});
+
+// 일반 사용자용 스키마 (기본 + 사용자 필수 필드)
+const UserSchema = BaseSchema.extend({
+    userType: z.literal('user'),
+    username: z.string().min(1, { message: "사용자명은 필수입니다." }).max(50),
+});
+
+// 통합 스키마 (userType에 따라 조건부 검증)
+const ClientSchema = z.discriminatedUnion('userType', [
+    AdvertiserSchema,
+    UserSchema,
+]);
+
+// 2. API 라우트 핸들러 함수
+export async function POST(req: NextRequest) {
     try {
-        console.log('🔐 Registration API called via API Gateway')
-        const body = await request.json()
-        const { userType, email, password, username, companyName, businessSetup } = body
+        // 클라이언트로부터 받은 데이터 유효성 검사
+        const clientData = ClientSchema.parse(await req.json());
 
-        console.log('📝 Registration data:', { userType, email, username: username || email })
+        // 3. 실제 백엔드 서버로 보낼 Payload 재구성
+        // 이메일에서 @ 기호를 제거하여 username으로 변환 (백엔드 username 규칙: 영문, 숫자, 언더스코어, 한글만 허용)
+        const emailUsername = clientData.email.replace('@', '_at_').replace(/[^a-zA-Z0-9_가-힣]/g, '_');
 
-        const requestBody = userType === 'advertiser'
-            ? {
-                username: email, // 사업자는 이메일을 username으로 사용
-                email: email,
-                password: password,
-                company_name: companyName,
-                business_setup: businessSetup, // 비즈니스 설정 데이터 추가
-            }
-            : {
-                username: username || email, // Use provided username or fallback to email
-                email: email,
-                password: password,
-            }
+        // userType에 따라 다른 payload 구성
+        let backendPayload: any;
 
-        console.log('📤 Request body:', { ...requestBody, password: '[HIDDEN]' })
+        if (clientData.userType === 'advertiser') {
+            // 광고주인 경우
+            const numericCategories = clientData.businessSetup.categories.map(c =>
+                typeof c === 'string' ? parseInt(c, 10) : c
+            );
 
-        // API Gateway를 통해 등록 처리
-        const gatewayPath = userType === 'advertiser'
+            backendPayload = {
+                username: emailUsername,
+                email: clientData.email,
+                password: clientData.password,
+                company_name: clientData.companyName,
+                business_setup: {
+                    ...clientData.businessSetup,
+                    categories: numericCategories,
+                },
+            };
+        } else {
+            // 일반 사용자인 경우
+            backendPayload = {
+                username: clientData.username || emailUsername, // 사용자가 입력한 username 또는 이메일 기반 username
+                email: clientData.email,
+                password: clientData.password,
+            };
+        }
+
+        // 광고주인 경우 advertiser-service로, 일반 사용자인 경우 user-service로 라우팅
+        const endpoint = clientData.userType === 'advertiser'
             ? '/api/advertiser/register'
             : '/api/auth/register';
 
-        console.log('🚀 Sending request to API Gateway...')
-        const response = await fetch(`${API_GATEWAY_URL}${gatewayPath}`, {
+        // 실제 백엔드 API 게이트웨이로 요청 전달
+        const response = await fetch(`${process.env.API_GATEWAY_URL}${endpoint}`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody),
-        })
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(backendPayload),
+        });
 
-        console.log('📥 Response status:', response.status)
-        console.log('📥 Response headers:', Object.fromEntries(response.headers.entries()))
+        // 4. 백엔드의 응답을 그대로 클라이언트에게 전달 (에러 메시지 보존)
+        const responseData = await response.json().catch(() => ({}));
+        return NextResponse.json(responseData, { status: response.status });
 
-        const data = await response.json()
-        console.log('📥 Response data:', data)
-
-        if (!response.ok) {
-            console.log('❌ Service returned error:', data)
-            return NextResponse.json(
-                { message: data.detail || 'Registration failed' },
-                { status: response.status }
-            )
+    } catch (error: any) {
+        // Zod 유효성 검사 실패 시, 상세한 오류 메시지 반환
+        if (error instanceof z.ZodError) {
+            return NextResponse.json({ detail: error.flatten().fieldErrors }, { status: 422 });
         }
-
-        console.log('✅ Registration successful via API Gateway')
-        // Add userType to the response for frontend routing
-        return NextResponse.json({
-            ...data,
-            userType: userType
-        })
-    } catch (error) {
-        console.error('💥 Registration API error:', error)
-        console.error('💥 Error type:', typeof error)
-        console.error('💥 Error message:', error instanceof Error ? error.message : 'Unknown error')
-        return NextResponse.json(
-            { message: 'Internal server error' },
-            { status: 500 }
-        )
+        // 기타 서버 오류 처리
+        return NextResponse.json({ detail: "알 수 없는 서버 오류가 발생했습니다." }, { status: 500 });
     }
-} 
+}

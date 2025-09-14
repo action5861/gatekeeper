@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Literal
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, validator, Field
@@ -51,53 +51,57 @@ async def startup():
     # 카테고리 초기 데이터 (idempotent)
     try:
         # name 컬럼에 UNIQUE 제약이 있다고 가정. 없다면 추가 권장.
-        await database.execute_many(
-            """
-            INSERT INTO business_categories (name, path, level, sort_order)
-            VALUES (:name, :path, :level, :sort_order)
-            ON CONFLICT (name) DO NOTHING
-            """,
-            [
-                {"name": "전자제품", "path": "전자제품", "level": 1, "sort_order": 1},
-                {"name": "패션/뷰티", "path": "패션/뷰티", "level": 1, "sort_order": 2},
-                {"name": "생활/건강", "path": "생활/건강", "level": 1, "sort_order": 3},
-                {"name": "식품/음료", "path": "식품/음료", "level": 1, "sort_order": 4},
-                {
-                    "name": "스포츠/레저/자동차",
-                    "path": "스포츠/레저/자동차",
-                    "level": 1,
-                    "sort_order": 5,
-                },
-                {"name": "유아/아동", "path": "유아/아동", "level": 1, "sort_order": 6},
-                {"name": "여행/문화", "path": "여행/문화", "level": 1, "sort_order": 7},
-                {"name": "반려동물", "path": "반려동물", "level": 1, "sort_order": 8},
-                {
-                    "name": "디지털 콘텐츠",
-                    "path": "디지털 콘텐츠",
-                    "level": 1,
-                    "sort_order": 9,
-                },
-                {
-                    "name": "부동산/인테리어",
-                    "path": "부동산/인테리어",
-                    "level": 1,
-                    "sort_order": 10,
-                },
-                {
-                    "name": "의료/건강",
-                    "path": "의료/건강",
-                    "level": 1,
-                    "sort_order": 11,
-                },
-                {"name": "서비스", "path": "서비스", "level": 1, "sort_order": 12},
-                {
-                    "name": "교육/도서",
-                    "path": "교육/도서",
-                    "level": 1,
-                    "sort_order": 13,
-                },
-            ],
-        )
+        # 카테고리 데이터를 개별적으로 삽입 (ON CONFLICT 지원)
+        categories = [
+            {"name": "전자제품", "path": "전자제품", "level": 1, "sort_order": 1},
+            {"name": "패션/뷰티", "path": "패션/뷰티", "level": 1, "sort_order": 2},
+            {"name": "생활/건강", "path": "생활/건강", "level": 1, "sort_order": 3},
+            {"name": "식품/음료", "path": "식품/음료", "level": 1, "sort_order": 4},
+            {
+                "name": "스포츠/레저/자동차",
+                "path": "스포츠/레저/자동차",
+                "level": 1,
+                "sort_order": 5,
+            },
+            {"name": "유아/아동", "path": "유아/아동", "level": 1, "sort_order": 6},
+            {"name": "여행/문화", "path": "여행/문화", "level": 1, "sort_order": 7},
+            {"name": "반려동물", "path": "반려동물", "level": 1, "sort_order": 8},
+            {
+                "name": "디지털 콘텐츠",
+                "path": "디지털 콘텐츠",
+                "level": 1,
+                "sort_order": 9,
+            },
+            {
+                "name": "부동산/인테리어",
+                "path": "부동산/인테리어",
+                "level": 1,
+                "sort_order": 10,
+            },
+            {
+                "name": "의료/건강",
+                "path": "의료/건강",
+                "level": 1,
+                "sort_order": 11,
+            },
+            {"name": "서비스", "path": "서비스", "level": 1, "sort_order": 12},
+            {
+                "name": "교육/도서",
+                "path": "교육/도서",
+                "level": 1,
+                "sort_order": 13,
+            },
+        ]
+
+        for category in categories:
+            await database.execute(
+                """
+                INSERT INTO business_categories (name, path, level, sort_order)
+                VALUES (:name, :path, :level, :sort_order)
+                ON CONFLICT (name) DO NOTHING
+                """,
+                category,
+            )
     except Exception as e:
         logger.exception("카테고리 초기화 중 오류: %r", e)
         # 계속 실행
@@ -161,6 +165,8 @@ async def get_current_advertiser(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     token = credentials.credentials
+    logger.info(f"Validating JWT token: {token[:50]}...")
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -180,25 +186,76 @@ async def get_current_advertiser(
             },
         )
         username = payload.get("sub")
+        logger.info(f"JWT payload extracted: username={username}")
+
         if not username:
+            logger.warning("No username found in JWT payload")
             raise credentials_exception
-    except JWTError:
+    except JWTError as e:
+        logger.error(f"JWT validation failed: {e}")
         raise credentials_exception
 
+    logger.info(f"Looking up advertiser with username: {username}")
     adv = await database.fetch_one(
         "SELECT * FROM advertisers WHERE username = :u OR email = :u",
         {"u": username},
     )
     if not adv:
+        logger.warning(f"Advertiser not found for username: {username}")
         raise credentials_exception
+
+    logger.info(f"Advertiser found: ID={adv['id']}, username={adv['username']}")
     return dict(adv)
 
 
-def require_admin(user: dict = Depends(get_current_advertiser)):
-    # advertisers 테이블에 role 컬럼(예: 'admin'|'user')이 있다고 가정
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="admin only")
-    return user
+async def get_current_admin(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """관리자 JWT 토큰 검증"""
+    print("=== requireAdminAuth called ===")
+    print("=== Admin Auth Debug ===")
+    print(
+        f"Authorization header: {credentials.scheme} {credentials.credentials[:50]}..."
+    )
+
+    token = credentials.credentials
+    print(f"Extracted token: {token[:50]}...")
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate admin credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,  # type: ignore
+            algorithms=[ALGORITHM],
+            issuer=JWT_ISSUER if JWT_ISSUER else None,
+            audience=JWT_AUDIENCE if JWT_AUDIENCE else None,
+        )
+        print(f"JWT payload: {payload}")
+
+        username = payload.get("username")
+        role = payload.get("role")
+        if username is None or role != "admin":
+            print(f"Invalid credentials: username={username}, role={role}")
+            raise credentials_exception
+
+        print("Admin auth successful")
+        admin_data = {
+            "username": str(username),
+            "role": str(role),
+            "id": payload.get("sub"),
+        }
+        print(f"Admin auth successful, returning admin: {admin_data.get('username')}")
+        return admin_data
+    except JWTError as e:
+        print(f"JWT decode error: {e}")
+        raise credentials_exception
+
+
+# require_admin 함수 제거 - get_current_admin에서 이미 role 검증을 수행함
 
 
 # ------------------------------------------------------------------------------
@@ -257,10 +314,22 @@ class BiddingSummary(BaseModel):
 
 
 class DashboardResponse(BaseModel):
-    biddingSummary: BiddingSummary
-    performanceHistory: List[PerformanceHistory]
-    recentBids: List[dict]
+    biddingSummary: Optional[BiddingSummary] = None
+    performanceHistory: Optional[List[PerformanceHistory]] = None
+    recentBids: Optional[List[dict]] = None
     additionalStats: Optional[dict] = None
+    advertiserInfo: Optional[dict] = None
+
+
+class BidRange(BaseModel):
+    min: int = Field(..., ge=50, le=10000, description="최소 입찰가")
+    max: int = Field(..., ge=50, le=10000, description="최대 입찰가")
+
+    @validator("max")
+    def validate_max_greater_than_min(cls, v, values):
+        if "min" in values and v <= values["min"]:
+            raise ValueError("최대 입찰가는 최소 입찰가보다 커야 합니다")
+        return v
 
 
 class BusinessSetupData(BaseModel):
@@ -268,7 +337,7 @@ class BusinessSetupData(BaseModel):
     keywords: List[str] = Field(..., description="키워드 목록")
     categories: List[int] = Field(..., description="카테고리 ID 목록")
     dailyBudget: int = Field(..., ge=1000, le=10000000)
-    bidRange: dict
+    bidRange: BidRange
 
     @validator("websiteUrl")
     def validate_website_url(cls, v):
@@ -368,6 +437,8 @@ async def get_recent_bids() -> List[dict]:
 async def register_advertiser(advertiser: AdvertiserRegister):
     """광고주 회원가입"""
     try:
+        logger.info(f"Registration attempt for: {advertiser.username}")
+        logger.info(f"Business setup data: {advertiser.business_setup}")
         # 이메일 중복
         existing_email = await database.fetch_one(
             "SELECT id FROM advertisers WHERE email = :email",
@@ -504,17 +575,18 @@ async def save_business_setup_data(
         await database.execute(
             """
             INSERT INTO auto_bid_settings (
-                advertiser_id, is_enabled, daily_budget, max_bid_per_keyword, 
+                advertiser_id, is_enabled, daily_budget, min_bid_per_keyword, max_bid_per_keyword, 
                 min_quality_score, preferred_categories, excluded_keywords
             )
-            VALUES (:advertiser_id, :is_enabled, :daily_budget, :max_bid_per_keyword, 
+            VALUES (:advertiser_id, :is_enabled, :daily_budget, :min_bid_per_keyword, :max_bid_per_keyword, 
                     :min_quality_score, :preferred_categories, :excluded_keywords)
             """,
             {
                 "advertiser_id": advertiser_id,
                 "is_enabled": False,
                 "daily_budget": business_setup.dailyBudget,
-                "max_bid_per_keyword": business_setup.bidRange["max"],
+                "min_bid_per_keyword": business_setup.bidRange.min,
+                "max_bid_per_keyword": business_setup.bidRange.max,
                 "min_quality_score": 50,
                 "preferred_categories": business_setup.categories,
                 "excluded_keywords": [],
@@ -543,23 +615,38 @@ async def create_review_status(advertiser_id: int):
 @app.post("/login", response_model=Token)
 async def login_advertiser(advertiser: AdvertiserLogin):
     try:
+        logger.info(f"Login attempt for username: {advertiser.username}")
+        logger.info(f"Password provided: {bool(advertiser.password)}")
+
         user = await database.fetch_one(
             "SELECT * FROM advertisers WHERE username = :u OR email = :u",
             {"u": advertiser.username},
         )
         if not user:
-            raise HTTPException(
-                status_code=401, detail="Incorrect username or password"
-            )
-        if not verify_password(advertiser.password, user["hashed_password"]):
+            logger.warning(f"User not found: {advertiser.username}")
             raise HTTPException(
                 status_code=401, detail="Incorrect username or password"
             )
 
+        logger.info(f"User found: {user['username']}, verifying password...")
+        password_valid = verify_password(advertiser.password, user["hashed_password"])
+        logger.info(f"Password verification result: {password_valid}")
+
+        if not password_valid:
+            logger.warning(f"Invalid password for user: {advertiser.username}")
+            raise HTTPException(
+                status_code=401, detail="Incorrect username or password"
+            )
+
+        token_data = {"sub": user["username"]}
+        logger.info(f"Creating JWT token with data: {token_data}")
+
         token = create_access_token(
-            data={"sub": user["username"]},
+            data=token_data,
             expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         )
+        logger.info(f"JWT token created successfully for user: {user['username']}")
+
         return {"access_token": token, "token_type": "bearer"}
     except HTTPException:
         raise
@@ -613,7 +700,7 @@ async def get_review_status(current_advertiser: dict = Depends(get_current_adver
 
 
 @app.get("/admin/pending-reviews")
-async def get_pending_reviews(_: dict = Depends(require_admin)):
+async def get_pending_reviews(admin_user: dict = Depends(get_current_admin)):
     try:
         advertisers = await database.fetch_all(
             """
@@ -665,7 +752,7 @@ async def get_pending_reviews(_: dict = Depends(require_admin)):
 
 
 @app.get("/admin/rejected-advertisers")
-async def get_rejected_advertisers(_: dict = Depends(require_admin)):
+async def get_rejected_advertisers(admin_user: dict = Depends(get_current_admin)):
     try:
         advertisers = await database.fetch_all(
             """
@@ -717,7 +804,7 @@ async def get_rejected_advertisers(_: dict = Depends(require_admin)):
 
 
 @app.get("/admin/approved-advertisers")
-async def get_approved_advertisers(_: dict = Depends(require_admin)):
+async def get_approved_advertisers(admin_user: dict = Depends(get_current_admin)):
     try:
         advertisers = await database.fetch_all(
             """
@@ -775,7 +862,7 @@ async def update_review_status(
     review_notes: str,
     recommended_bid_min: int,
     recommended_bid_max: int,
-    _: dict = Depends(require_admin),
+    admin_user: dict = Depends(get_current_admin),
 ):
     try:
         await database.execute(
@@ -811,7 +898,7 @@ async def update_advertiser_data(
     advertiser_id: int,
     keywords: List[str],
     categories: List[str],
-    _: dict = Depends(require_admin),
+    admin_user: dict = Depends(get_current_admin),
 ):
     try:
         await database.execute(
@@ -877,6 +964,7 @@ async def submit_additional_info(additional_info: dict):
 async def get_dashboard(current_advertiser: dict = Depends(get_current_advertiser)):
     try:
         advertiser_id = current_advertiser["id"]
+        logger.info(f"Dashboard request for advertiser_id: {advertiser_id}")
 
         review_info = await database.fetch_one(
             """
@@ -887,6 +975,25 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
             {"id": advertiser_id},
         )
         review_status = review_info["review_status"] if review_info else "pending"
+        logger.info(f"Review status: {review_status}")
+
+        # 광고주 기본 정보 가져오기 (심사 상태와 관계없이)
+        advertiser_info = await database.fetch_one(
+            """
+            SELECT company_name, website_url, daily_budget
+            FROM advertisers WHERE id = :id
+            """,
+            {"id": advertiser_id},
+        )
+        logger.info(f"Advertiser info from DB: {advertiser_info}")
+
+        advertiser_info_dict = dict(advertiser_info) if advertiser_info else {}
+        advertiser_data = {
+            "company_name": advertiser_info_dict.get("company_name", ""),
+            "website_url": advertiser_info_dict.get("website_url", ""),
+            "daily_budget": float(advertiser_info_dict.get("daily_budget", 10000)),
+        }
+        logger.info(f"Processed advertiser_data: {advertiser_data}")
 
         if review_status == "approved":
             # 1) 입찰 요약
@@ -1043,12 +1150,15 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
             averageBidAmount=round(average_bid_amount, 2),
         )
 
-        return DashboardResponse(
+        response_data = DashboardResponse(
             biddingSummary=bidding_summary,
             performanceHistory=performance_history,
             recentBids=recent_bids,
             additionalStats=additional_stats,
+            advertiserInfo=advertiser_data,
         )
+        logger.info(f"Dashboard response data: {response_data}")
+        return response_data
     except HTTPException:
         raise
     except Exception as e:
@@ -1088,6 +1198,77 @@ async def get_current_advertiser_info(
     except Exception as e:
         logger.exception("get_current_advertiser_info error: %r", e)
         raise HTTPException(status_code=500, detail=f"광고주 정보 조회 실패: {str(e)}")
+
+
+@app.put("/update-account-info")
+async def update_account_info(
+    account_info: dict,
+    current_advertiser: dict = Depends(get_current_advertiser),
+):
+    """광고주 계정 정보 업데이트"""
+    try:
+        advertiser_id = current_advertiser["id"]
+
+        # 입력 데이터 검증
+        company_name = account_info.get("companyName", "").strip()
+        website_url = account_info.get("websiteUrl", "").strip()
+        daily_budget = account_info.get("dailyBudget", 10000)
+
+        if not company_name:
+            raise HTTPException(status_code=400, detail="회사명은 필수입니다")
+
+        if website_url and not validate_url(website_url):
+            raise HTTPException(status_code=400, detail="올바른 URL 형식이 아닙니다")
+
+        if not isinstance(daily_budget, (int, float)) or daily_budget < 1000:
+            raise HTTPException(
+                status_code=400, detail="일일 예산은 1,000원 이상이어야 합니다"
+            )
+
+        # 데이터베이스 업데이트
+        await database.execute(
+            """
+            UPDATE advertisers 
+            SET company_name = :company_name, 
+                website_url = :website_url, 
+                daily_budget = :daily_budget,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :id
+            """,
+            {
+                "id": advertiser_id,
+                "company_name": company_name,
+                "website_url": website_url,
+                "daily_budget": float(daily_budget),
+            },
+        )
+
+        # 자동입찰 설정도 업데이트
+        await database.execute(
+            """
+            UPDATE auto_bid_settings 
+            SET daily_budget = :daily_budget,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE advertiser_id = :id
+            """,
+            {
+                "id": advertiser_id,
+                "daily_budget": float(daily_budget),
+            },
+        )
+
+        return {
+            "success": True,
+            "message": "계정 정보가 성공적으로 업데이트되었습니다",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Update account info error: %r", e)
+        raise HTTPException(
+            status_code=500, detail=f"계정 정보 업데이트 실패: {str(e)}"
+        )
 
 
 @app.get("/auto-bid-settings/{advertiser_id}")
@@ -1934,7 +2115,9 @@ async def get_business_categories():
 # 삭제(관리자)
 # ------------------------------------------------------------------------------
 @app.delete("/admin/delete-advertiser/{advertiser_id}")
-async def delete_advertiser(advertiser_id: int, _: dict = Depends(require_admin)):
+async def delete_advertiser(
+    advertiser_id: int, admin_user: dict = Depends(get_current_admin)
+):
     try:
         status_row = await database.fetch_val(
             "SELECT review_status FROM advertiser_reviews WHERE advertiser_id = :id",

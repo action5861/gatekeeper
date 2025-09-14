@@ -172,6 +172,22 @@ class AutoBidSetting(Base):
     )
 
 
+# BusinessCategory model
+class BusinessCategory(Base):
+    __tablename__ = "business_categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    path = Column(String(200), nullable=False)
+    level = Column(Integer, nullable=True)
+    parent_id = Column(Integer, ForeignKey("business_categories.id"), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.current_timestamp()
+    )
+    is_active = Column(Boolean, default=True)
+    sort_order = Column(Integer, nullable=True)
+
+
 # Database connection functions
 async def connect_to_database():
     await database.connect()

@@ -41,11 +41,21 @@ app.add_middleware(
 
 
 # 입력값 검증 함수들
-def sanitize_input(value: str) -> str:
+def sanitize_input(value: str, is_url: bool = False) -> str:
     """XSS 방지를 위한 입력값 이스케이핑"""
     if not isinstance(value, str):
         return str(value)
-    return html.escape(value.strip())
+
+    value = value.strip()
+
+    # URL인 경우 특수 문자 보존
+    if is_url:
+        # URL에서 허용되는 특수 문자들을 보존
+        # : / ? & = # 등은 URL에서 필수이므로 이스케이프하지 않음
+        return value
+
+    # 일반 텍스트는 HTML 이스케이프 적용
+    return html.escape(value)
 
 
 def validate_sql_injection(value: str) -> bool:
@@ -180,6 +190,14 @@ class TransactionsResponse(BaseModel):
     limit: int = Field(..., ge=1, le=100)
 
 
+class AwardRequest(BaseModel):
+    userId: int
+    bidId: str
+    type: str  # "PLATFORM" | "ADVERTISER"
+    amount: int
+    reason: str  # "click"
+
+
 # JWT 설정
 SECRET_KEY = os.getenv(
     "JWT_SECRET_KEY", "your-super-secret-jwt-key-change-in-production"
@@ -195,11 +213,34 @@ async def get_user_id_from_token(
 ):
     """JWT 토큰에서 사용자 ID 추출"""
     try:
+        print(f"🔍 JWT Token received: {credentials.credentials[:20]}...")
+        print(f"🔍 SECRET_KEY: {SECRET_KEY[:10]}...")
+
         payload = jwt.decode(
-            credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM]
+            credentials.credentials,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience=(
+                os.getenv("JWT_AUDIENCE", "digisafe-client")
+                if os.getenv("JWT_AUDIENCE")
+                else None
+            ),
+            issuer=(
+                os.getenv("JWT_ISSUER", "digisafe-api")
+                if os.getenv("JWT_ISSUER")
+                else None
+            ),
+            options={
+                "require_exp": True,
+                "verify_aud": bool(os.getenv("JWT_AUDIENCE")),
+                "verify_iss": bool(os.getenv("JWT_ISSUER")),
+            },
         )
+        print(f"🔍 JWT Payload: {payload}")
+
         email = payload.get("sub")
         if email is None:
+            print("❌ No email in JWT payload")
             raise HTTPException(status_code=401, detail="Invalid token")
 
         # 이메일로 사용자 ID 조회
@@ -207,8 +248,10 @@ async def get_user_id_from_token(
             "SELECT id FROM users WHERE email = :email", {"email": email}
         )
         if not user:
+            print(f"❌ User not found for email: {email}")
             raise HTTPException(status_code=401, detail="User not found")
 
+        print(f"✅ User found: {user['id']} for email: {email}")
         return user["id"]
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -226,8 +269,8 @@ async def process_reward(
     try:
         print(f"🎯 Payment API called for user {user_id}: {request.dict()}")
 
-        # 보상 지급 시뮬레이션 (90% 성공률)
-        is_success = random.random() > 0.1
+        # 보상 지급 시뮬레이션 (100% 성공률로 임시 변경)
+        is_success = True  # random.random() > 0.1 대신 True로 고정
 
         if is_success:
             # 새로운 거래 내역 생성
@@ -282,7 +325,16 @@ async def process_reward(
             )
 
     except Exception as e:
-        print(f"❌ Payment API error for user {user_id}: {e}")
+        import traceback
+
+        error_traceback = traceback.format_exc()
+        print(f"❌ Payment API error: {e}")
+        print(f"❌ Full traceback: {error_traceback}")
+
+        # user_id가 정의되지 않았을 수 있으므로 안전하게 처리
+        user_info = f"user {user_id}" if "user_id" in locals() else "unknown user"
+        print(f"❌ Error occurred for {user_info}")
+
         return RewardResponse(
             success=False,
             message="서버 오류가 발생했습니다.",
@@ -336,6 +388,78 @@ async def get_transactions():
         raise HTTPException(
             status_code=500, detail=f"Failed to fetch transactions: {str(e)}"
         )
+
+
+@app.post("/award")
+async def award(request: AwardRequest):
+    """클릭 적립 처리 (PLATFORM 및 ADVERTISER 모두 지원)"""
+    try:
+        print(f"🎯 Award request: {request.dict()}")
+
+        # 1. 광고주 ID 조회 (ADVERTISER 타입인 경우)
+        advertiser_id = None
+        if request.type == "ADVERTISER":
+            # bid_id에서 광고주 ID 추출 시도
+            try:
+                if request.bidId.startswith("bid_real_"):
+                    parts = request.bidId.split("_")
+                    if len(parts) >= 3:
+                        advertiser_id = int(parts[2])
+            except (ValueError, IndexError):
+                advertiser_id = None
+
+        # 2. 거래 내역 생성
+        transaction_id = f"TXN_{request.bidId}_{int(datetime.now().timestamp())}"
+
+        insert_query = """
+            INSERT INTO transactions (
+                id, user_id, bid_id, advertiser_id, amount, source, reason, status, created_at
+            ) VALUES (
+                :transaction_id, :user_id, :bid_id, :advertiser_id, :amount, :source, :reason, 'completed', CURRENT_TIMESTAMP
+            )
+        """
+
+        await database.execute(
+            insert_query,
+            {
+                "transaction_id": transaction_id,
+                "user_id": request.userId,
+                "bid_id": request.bidId,
+                "advertiser_id": advertiser_id,
+                "amount": request.amount,
+                "source": request.type,
+                "reason": request.reason,
+            },
+        )
+
+        print(f"✅ Transaction created: {transaction_id}")
+
+        # 3. user-service에 거래 알림 (선택적)
+        try:
+            import httpx
+
+            user_tx_url = "http://user-service:8005/transactions/record"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    user_tx_url,
+                    json={
+                        "userId": request.userId,
+                        "transactionId": transaction_id,
+                        "amount": request.amount,
+                        "source": request.type,
+                        "reason": request.reason,
+                    },
+                )
+            print(f"✅ User service notified")
+        except Exception as e:
+            print(f"⚠️ User service notification failed: {e}")
+            # 알림 실패는 전체 프로세스에 영향을 주지 않음
+
+        return {"ok": True, "transactionId": transaction_id}
+
+    except Exception as e:
+        print(f"❌ Award error: {e}")
+        raise HTTPException(status_code=500, detail=f"Award error: {str(e)}")
 
 
 @app.get("/health")

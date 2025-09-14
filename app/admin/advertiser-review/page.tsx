@@ -37,7 +37,13 @@ export default function AdminAdvertiserReviewPage() {
     const checkTokenAndRedirect = useCallback(() => {
         if (typeof window === 'undefined') return null
         const token = localStorage.getItem('adminToken')
+        console.log('=== 토큰 확인 ===')
+        console.log('토큰 존재 여부:', !!token)
+        console.log('토큰 길이:', token?.length || 0)
+        console.log('토큰 앞 20자:', token?.substring(0, 20) || '없음')
+
         if (!token) {
+            console.log('토큰이 없어서 로그인 페이지로 리다이렉트')
             router.push('/admin/login')
             return null
         }
@@ -53,9 +59,13 @@ export default function AdminAdvertiserReviewPage() {
 
         try {
             console.log('API 요청 전송 중...')
+            console.log('요청 URL:', '/api/admin/advertiser-review?status=approved')
+            console.log('Authorization 헤더:', `Bearer ${token.substring(0, 20)}...`)
+
             const response = await fetch('/api/admin/advertiser-review?status=approved', {
                 headers: {
                     'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
                 },
             })
 
@@ -63,10 +73,13 @@ export default function AdminAdvertiserReviewPage() {
 
             if (!response.ok) {
                 if (response.status === 401) {
+                    console.log('401 Unauthorized - 토큰이 만료되었거나 유효하지 않음')
                     localStorage.removeItem('adminToken')
                     router.push('/admin/login')
                     return
                 }
+                const errorText = await response.text()
+                console.error('API 응답 오류:', response.status, errorText)
                 throw new Error(`HTTP ${response.status}: Failed to fetch approved advertisers`)
             }
 
@@ -95,18 +108,26 @@ export default function AdminAdvertiserReviewPage() {
         if (!token) return
 
         try {
+            console.log('=== fetchPendingReviews API 요청 ===')
+            console.log('요청 URL:', '/api/admin/advertiser-review')
+            console.log('Authorization 헤더:', `Bearer ${token.substring(0, 20)}...`)
+
             const response = await fetch('/api/admin/advertiser-review', {
                 headers: {
                     'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
                 },
             })
 
             if (!response.ok) {
                 if (response.status === 401) {
+                    console.log('401 Unauthorized - 토큰이 만료되었거나 유효하지 않음')
                     localStorage.removeItem('adminToken')
                     router.push('/admin/login')
                     return
                 }
+                const errorText = await response.text()
+                console.error('API 응답 오류:', response.status, errorText)
                 throw new Error('Failed to fetch pending reviews')
             }
 
@@ -123,18 +144,26 @@ export default function AdminAdvertiserReviewPage() {
         if (!token) return
 
         try {
+            console.log('=== fetchRejectedAdvertisers API 요청 ===')
+            console.log('요청 URL:', '/api/admin/advertiser-review?status=rejected')
+            console.log('Authorization 헤더:', `Bearer ${token.substring(0, 20)}...`)
+
             const response = await fetch('/api/admin/advertiser-review?status=rejected', {
                 headers: {
                     'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
                 },
             })
 
             if (!response.ok) {
                 if (response.status === 401) {
+                    console.log('401 Unauthorized - 토큰이 만료되었거나 유효하지 않음')
                     localStorage.removeItem('adminToken')
                     router.push('/admin/login')
                     return
                 }
+                const errorText = await response.text()
+                console.error('API 응답 오류:', response.status, errorText)
                 throw new Error('Failed to fetch rejected advertisers')
             }
 
@@ -162,7 +191,7 @@ export default function AdminAdvertiserReviewPage() {
             setIsLoading(false)
             setIsRefreshing(false)
         }
-    }, [fetchPendingReviews, fetchRejectedAdvertisers, fetchApprovedAdvertisers])
+    }, []) // 의존성 배열을 비워서 한 번만 생성
 
     // 탭별 데이터 로드
     const loadTabData = useCallback(async () => {
@@ -173,7 +202,7 @@ export default function AdminAdvertiserReviewPage() {
         } else if (activeTab === 'approved') {
             await fetchApprovedAdvertisers()
         }
-    }, [activeTab, fetchPendingReviews, fetchRejectedAdvertisers, fetchApprovedAdvertisers])
+    }, [activeTab]) // activeTab만 의존성으로 설정
 
     // 심사 업데이트 처리
     const handleReviewUpdate = async (
@@ -317,7 +346,7 @@ export default function AdminAdvertiserReviewPage() {
         if (typeof window === 'undefined') return
         console.log('=== 탭 변경됨:', activeTab, '===')
         loadTabData()
-    }, [activeTab, loadTabData])
+    }, [activeTab]) // activeTab만 의존성으로 설정
 
     // 상태 변경 감지를 위한 디버깅 useEffect
     useEffect(() => {

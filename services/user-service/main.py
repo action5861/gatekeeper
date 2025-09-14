@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, validator, Field
@@ -6,6 +6,7 @@ from typing import List, Literal, Optional
 import os
 import re
 import html
+import random
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -53,11 +54,21 @@ security = HTTPBearer()
 
 
 # 입력값 검증 함수들
-def sanitize_input(value: str) -> str:
+def sanitize_input(value: str, is_url: bool = False) -> str:
     """XSS 방지를 위한 입력값 이스케이핑"""
     if not isinstance(value, str):
         return str(value)
-    return html.escape(value.strip())
+
+    value = value.strip()
+
+    # URL인 경우 특수 문자 보존
+    if is_url:
+        # URL에서 허용되는 특수 문자들을 보존
+        # : / ? & = # 등은 URL에서 필수이므로 이스케이프하지 않음
+        return value
+
+    # 일반 텍스트는 HTML 이스케이프 적용
+    return html.escape(value)
 
 
 def validate_password_strength(password: str) -> bool:
@@ -101,7 +112,7 @@ class UserCreate(BaseModel):
 
     @validator("username")
     def validate_username(cls, v):
-        v = sanitize_input(v)
+        v = v.strip()  # sanitize_input 대신 strip만 사용
         if not re.match(r"^[a-zA-Z0-9_가-힣]+$", v):
             raise ValueError(
                 "사용자명은 영문, 숫자, 언더스코어, 한글만 사용 가능합니다"
@@ -172,6 +183,7 @@ class SubmissionLimit(BaseModel):
         "Below Average",
         "Poor",
         "Very Poor",
+        "Standard",  # 임시로 추가
     ]
     dailyMax: int = Field(..., ge=0, le=1000)
 
@@ -186,8 +198,37 @@ class DashboardResponse(BaseModel):
     transactions: List[dict]
 
 
-class EarningsRequest(BaseModel):
-    amount: int = Field(..., ge=0, le=1000000)
+class DetailedEarningsRequest(BaseModel):
+    """Enhanced earnings request with detailed transaction information"""
+
+    userId: Optional[str] = Field(
+        None, description="User ID (optional, will use JWT if not provided)"
+    )
+    amount: int = Field(..., ge=0, le=1000000, description="Reward amount")
+    query: Optional[str] = Field(None, max_length=500, description="Search query")
+    adType: Optional[str] = Field(None, description="Ad type (bidded/fallback)")
+    searchId: Optional[str] = Field(None, max_length=100, description="Search ID")
+    bidId: Optional[str] = Field(None, max_length=100, description="Bid ID")
+
+    @validator("query")
+    def validate_query(cls, v):
+        if v:
+            v = sanitize_input(v)
+            if not validate_sql_injection(v):
+                raise ValueError("검색어에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
+
+    @validator("searchId", "bidId")
+    def validate_id(cls, v):
+        if v:
+            v = sanitize_input(v)
+            if not re.match(r"^[가-힣a-zA-Z0-9_-]+$", v):
+                raise ValueError(
+                    "ID는 한글, 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다"
+                )
+            if not validate_sql_injection(v):
+                raise ValueError("ID에 허용되지 않는 문자가 포함되어 있습니다")
+        return v
 
 
 class QualityScoreRequest(BaseModel):
@@ -248,11 +289,22 @@ class AuctionCompletedRequest(BaseModel):
     @validator("search_id", "selected_bid_id")
     def validate_id(cls, v):
         v = sanitize_input(v)
-        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
-            raise ValueError("ID는 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다")
+        # 한글, 영문, 숫자, 언더스코어, 하이픈을 허용하도록 수정
+        if not re.match(r"^[가-힣a-zA-Z0-9_-]+$", v):
+            raise ValueError(
+                "ID는 한글, 영문, 숫자, 언더스코어, 하이픈만 사용 가능합니다"
+            )
         if not validate_sql_injection(v):
             raise ValueError("ID에 허용되지 않는 문자가 포함되어 있습니다")
         return v
+
+
+class TxRecord(BaseModel):
+    userId: int
+    transactionId: str
+    amount: int
+    source: str
+    reason: str
 
 
 # 🔐 보안 함수들
@@ -271,35 +323,67 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
+
+    # JWT 표준 클레임 추가
+    to_encode.update(
+        {
+            "iss": os.getenv("JWT_ISSUER", "digisafe-api"),
+            "aud": os.getenv("JWT_AUDIENCE", "digisafe-client"),
+        }
+    )
+
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 
 def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    """품질 점수에 따른 동적 제출 한도를 계산합니다."""
-    base_limit = 5  # 기본 일일 한도를 5개로 변경
+    """일일 제출 한도를 환경 변수에서 가져옵니다."""
+    # 환경 변수에서 일일 한도 가져오기 (기본값: 5)
+    daily_limit = int(os.getenv("DEFAULT_DAILY_LIMIT", "5"))
+    # 모든 사용자에게 동일하게 하루 제출 한도 제공
+    # 추후 quality_score에 따라 동적으로 변경 가능
+    return SubmissionLimit(level="Standard", dailyMax=daily_limit)
 
-    if quality_score >= 95:
-        # 'Excellent' 등급: 300% (15개)
-        return SubmissionLimit(level="Excellent", dailyMax=base_limit * 3)
-    elif quality_score >= 90:
-        # 'Very Good' 등급: 200% (10개)
-        return SubmissionLimit(level="Very Good", dailyMax=base_limit * 2)
-    elif quality_score >= 80:
-        # 'Good' 등급: 160% (8개)
-        return SubmissionLimit(level="Good", dailyMax=int(base_limit * 1.6))
-    elif quality_score >= 70:
-        # 'Average' 등급: 120% (6개)
-        return SubmissionLimit(level="Average", dailyMax=int(base_limit * 1.2))
-    elif quality_score >= 50:
-        # 'Below Average' 등급: 100% (5개)
-        return SubmissionLimit(level="Below Average", dailyMax=base_limit)
-    elif quality_score >= 30:
-        # 'Poor' 등급: 60% (3개)
-        return SubmissionLimit(level="Poor", dailyMax=int(base_limit * 0.6))
-    else:
-        # 'Very Poor' 등급: 40% (2개)
-        return SubmissionLimit(level="Very Poor", dailyMax=int(base_limit * 0.4))
+
+# 🔥 새로운 헬퍼 함수들 - 트랜잭션 기준으로 통일
+async def _used_today_from_tx(user_id: int) -> int:
+    """오늘 생성된 트랜잭션 수를 기준으로 사용량 계산"""
+    row = await database.fetch_one(
+        """
+        SELECT COUNT(*) AS c
+        FROM transactions
+        WHERE user_id = :uid
+          AND created_at::date = CURRENT_DATE
+        """,
+        {"uid": user_id},
+    )
+    return int(row["c"] or 0) if row else 0
+
+
+async def _today_quality_avg(user_id: int) -> int:
+    """오늘의 품질 점수 평균 계산"""
+    row = await database.fetch_one(
+        """
+        SELECT AVG(quality_score) AS avg_q
+        FROM search_queries
+        WHERE user_id = :uid
+          AND created_at::date = CURRENT_DATE
+        """,
+        {"uid": user_id},
+    )
+    return int(round(float(row["avg_q"])) if row and row["avg_q"] is not None else 50)
+
+
+async def _remaining_from_tx(user_id: int, quality_score: int = 0) -> dict:
+    """트랜잭션 기준으로 남은 사용량 계산"""
+    limit = calculate_dynamic_limit(quality_score).dailyMax
+    used = await _used_today_from_tx(user_id)
+    return {
+        "count": used,
+        "limit": limit,
+        "remaining": max(0, limit - used),
+        "qualityScoreAvg": await _today_quality_avg(user_id),
+    }
 
 
 # JWT 인증 함수
@@ -313,7 +397,24 @@ async def get_current_user(
     )
     try:
         payload = jwt.decode(
-            credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM]
+            credentials.credentials,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience=(
+                os.getenv("JWT_AUDIENCE", "digisafe-client")
+                if os.getenv("JWT_AUDIENCE")
+                else None
+            ),
+            issuer=(
+                os.getenv("JWT_ISSUER", "digisafe-api")
+                if os.getenv("JWT_ISSUER")
+                else None
+            ),
+            options={
+                "require_exp": True,
+                "verify_aud": bool(os.getenv("JWT_AUDIENCE")),
+                "verify_iss": bool(os.getenv("JWT_ISSUER")),
+            },
         )
         email = payload.get("sub")
         if email is None:
@@ -439,36 +540,6 @@ async def login_for_access_token(form_data: UserLogin):
 
         print(f"💥 Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"로그인 실패: {str(e)}")
-
-
-# 🔥 새로 추가된 /earnings 엔드포인트
-@app.post("/earnings")
-async def update_earnings(
-    request: EarningsRequest, current_user: dict = Depends(get_current_user)
-):
-    """🔥 JWT에서 실제 사용자 ID 추출하여 수익 업데이트"""
-    try:
-        user_id = current_user["id"]  # 🚨 하드코딩 완전 제거!
-        amount = request.amount
-
-        print(f"💰 Updating earnings for user {user_id}: +{amount}")
-
-        # 실제 사용자의 수익 업데이트
-        await database.execute(
-            "UPDATE users SET total_earnings = total_earnings + :amount WHERE id = :user_id",
-            {"amount": amount, "user_id": user_id},
-        )
-
-        print(f"✅ Successfully updated earnings for user {user_id}")
-        return {
-            "success": True,
-            "message": "수익이 업데이트되었습니다.",
-            "user_id": user_id,
-        }
-
-    except Exception as e:
-        print(f"❌ Earnings update error for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/dashboard", response_model=DashboardResponse)
@@ -597,25 +668,9 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         )
         quality_score = current_user_data["quality_score"] if current_user_data else 75
 
-        # 4. 일일 제출 현황 조회
-        daily_submission = await database.fetch_one(
-            """
-            SELECT submission_count, quality_score_avg
-            FROM daily_submissions 
-            WHERE user_id = :user_id AND submission_date = CURRENT_DATE
-            """,
-            {"user_id": user_id},
-        )
-
-        # 일일 제출 현황이 없으면 기본값 설정
-        if daily_submission is None:
-            daily_submission = {
-                "submission_count": 0,
-                "quality_score_avg": quality_score,
-            }
-
-        # 5. 동적 제출 한도 계산
+        # 4. 트랜잭션 기준으로 일일 사용량 계산 (기존 daily_submissions 대신)
         submission_limit = calculate_dynamic_limit(quality_score)
+        daily_submission = await _remaining_from_tx(user_id, quality_score)
 
         # 5. 사용자별 거래 내역 조회
         transactions = await database.fetch_all(
@@ -735,18 +790,7 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
                 ),
             },
             submissionLimit=submission_limit,
-            dailySubmission={
-                "count": int(daily_submission["submission_count"] or 0),
-                "limit": submission_limit.dailyMax,
-                "remaining": max(
-                    0,
-                    submission_limit.dailyMax
-                    - int(daily_submission["submission_count"] or 0),
-                ),
-                "qualityScoreAvg": int(
-                    daily_submission["quality_score_avg"] or quality_score
-                ),
-            },
+            dailySubmission=daily_submission,
             stats={
                 "monthlySearches": monthly_search_count,
                 "successRate": success_rate,
@@ -831,114 +875,115 @@ async def update_quality_score(
 async def update_daily_submission(
     request: SubmissionRequest, current_user: dict = Depends(get_current_user)
 ):
-    """일일 제출 카운트를 업데이트합니다."""
+    """
+    일일 제출 카운트를 업데이트합니다. (계산 로직 수정 및 안정화 버전)
+    """
+    user_id = current_user["id"]
+    quality_score = request.quality_score
+    today = datetime.now().date()
+
+    print(
+        f"📝 Updating daily submission for user {user_id} with quality score {quality_score}"
+    )
+
     try:
-        user_id = current_user["id"]
-        quality_score = request.quality_score
-
-        print(
-            f"📝 Updating daily submission for user {user_id} with quality score {quality_score}"
-        )
-
-        # 1. 오늘 날짜의 일일 제출 기록 확인
-        today = datetime.now().date()
-
-        existing_record = await database.fetch_one(
-            """
-            SELECT submission_count, quality_score_avg
-            FROM daily_submissions 
-            WHERE user_id = :user_id AND submission_date = :today
-            """,
-            {"user_id": user_id, "today": today},
-        )
-
-        if existing_record:
-            # 기존 기록이 있으면 카운트 증가 및 평균 품질 점수 업데이트
-            current_count = existing_record["submission_count"] or 0
-            current_avg = existing_record["quality_score_avg"] or 0
-
-            new_count = current_count + 1
-            # 새로운 평균 계산: (기존 평균 * 기존 개수 + 새로운 점수) / 새로운 개수
-            new_avg = round(
-                ((current_avg * current_count) + quality_score) / new_count, 1
-            )
-
-            await database.execute(
+        # 트랜잭션 시작 (선택적이지만 데이터 정합성에 좋음)
+        async with database.transaction():
+            # 1. 오늘 날짜의 기록을 먼저 조회합니다.
+            existing_record = await database.fetch_one(
                 """
-                UPDATE daily_submissions 
-                SET submission_count = :new_count, 
-                    quality_score_avg = :new_avg,
-                    updated_at = CURRENT_TIMESTAMP
+                SELECT id, submission_count, quality_score_avg
+                FROM daily_submissions 
                 WHERE user_id = :user_id AND submission_date = :today
                 """,
-                {
-                    "user_id": user_id,
-                    "today": today,
-                    "new_count": new_count,
-                    "new_avg": new_avg,
-                },
-            )
-        else:
-            # 새로운 기록 생성
-            await database.execute(
-                """
-                INSERT INTO daily_submissions (
-                    user_id, submission_date, submission_count, 
-                    quality_score_avg, created_at, updated_at
-                )
-                VALUES (
-                    :user_id, :today, 1, :quality_score, 
-                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                )
-                """,
-                {
-                    "user_id": user_id,
-                    "today": today,
-                    "quality_score": quality_score,
-                },
+                {"user_id": user_id, "today": today},
             )
 
-        # 2. 동적 제출 한도 계산
-        submission_limit = calculate_dynamic_limit(quality_score)
+            if existing_record:
+                # 2-A. 기록이 있으면, 카운트를 1 증가시키고 평균 점수를 다시 계산합니다.
+                current_count = existing_record["submission_count"]
+                current_avg = existing_record["quality_score_avg"]
 
-        # 3. 업데이트된 일일 제출 정보 조회
-        updated_record = await database.fetch_one(
-            """
-            SELECT submission_count, quality_score_avg
-            FROM daily_submissions 
-            WHERE user_id = :user_id AND submission_date = :today
-            """,
+                new_count = current_count + 1
+                new_avg = round(
+                    ((current_avg * current_count) + quality_score) / new_count, 1
+                )
+
+                await database.execute(
+                    """
+                    UPDATE daily_submissions 
+                    SET submission_count = :new_count, quality_score_avg = :new_avg
+                    WHERE id = :record_id
+                    """,
+                    {
+                        "new_count": new_count,
+                        "new_avg": new_avg,
+                        "record_id": existing_record["id"],
+                    },
+                )
+                updated_count = new_count
+            else:
+                # 2-B. 기록이 없으면, 새로운 기록을 생성합니다.
+                await database.execute(
+                    """
+                    INSERT INTO daily_submissions (user_id, submission_date, submission_count, quality_score_avg)
+                    VALUES (:user_id, :today, 1, :quality_score)
+                    """,
+                    {
+                        "user_id": user_id,
+                        "today": today,
+                        "quality_score": quality_score,
+                    },
+                )
+                updated_count = 1
+
+        # 3. 사용자의 현재 품질 점수를 기준으로 제출 한도를 다시 계산합니다.
+        user_quality_score_record = await database.fetch_one(
+            "SELECT quality_score FROM users WHERE id = :user_id", {"user_id": user_id}
+        )
+        current_quality_score = (
+            user_quality_score_record["quality_score"]
+            if user_quality_score_record
+            else 75
+        )
+        submission_limit = calculate_dynamic_limit(current_quality_score)
+
+        # 4. 최종적으로 남은 작업량을 계산하여 응답을 구성합니다.
+        remaining = max(0, submission_limit.dailyMax - updated_count)
+
+        # 최종 품질 점수 평균 조회
+        final_quality_record = await database.fetch_one(
+            "SELECT quality_score_avg FROM daily_submissions WHERE user_id = :user_id AND submission_date = :today",
             {"user_id": user_id, "today": today},
         )
+        final_quality_avg = (
+            final_quality_record["quality_score_avg"]
+            if final_quality_record
+            else quality_score
+        )
 
-        # updated_record가 None인 경우 기본값 설정
-        if updated_record is None:
-            updated_record = {"submission_count": 0, "quality_score_avg": quality_score}
-
-        daily_submission = {
-            "count": int(updated_record["submission_count"] or 0),
+        daily_submission_status = {
+            "count": updated_count,
             "limit": submission_limit.dailyMax,
-            "remaining": max(
-                0,
-                submission_limit.dailyMax
-                - int(updated_record["submission_count"] or 0),
-            ),
-            "qualityScoreAvg": float(
-                updated_record["quality_score_avg"] or quality_score
-            ),
+            "remaining": remaining,
+            "qualityScoreAvg": final_quality_avg,
         }
 
-        print(f"✅ Daily submission updated for user {user_id}: {daily_submission}")
+        print(
+            f"✅ Daily submission updated for user {user_id}: {daily_submission_status}"
+        )
 
         return {
             "success": True,
             "message": "일일 제출 카운트가 업데이트되었습니다.",
-            "dailySubmission": daily_submission,
-            "submissionLimit": submission_limit,
+            "dailySubmission": daily_submission_status,
         }
 
     except Exception as e:
+        import traceback
+
         print(f"❌ Update daily submission error for user {user_id}: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -946,18 +991,12 @@ async def update_daily_submission(
 async def search_completed(
     request: SearchCompletedRequest, current_user: dict = Depends(get_current_user)
 ):
-    """검색 완료 시 데이터 저장 및 통계 업데이트"""
+    """검색 완료 시 데이터 저장 (제출 횟수 카운트 제외)"""
     try:
         user_id = current_user["id"]
 
-        print(f"🔍 Search completed for user {user_id}")
-        print(f"   Received data: {request}")
+        print(f"🔍 Search completed for user {user_id} (Data logging only)")
         print(f"   Query: {request.query}")
-        print(f"   Quality score: {request.quality_score}")
-        print(f"   Commercial value: {request.commercial_value}")
-        print(f"   Auction ID: {request.auction_id}")
-        print(f"   Keywords: {request.keywords}")
-        print(f"   Suggestions: {request.suggestions}")
 
         # 1. search_queries 테이블에 검색 데이터 저장
         await database.execute(
@@ -979,7 +1018,6 @@ async def search_completed(
         from datetime import datetime
 
         current_week = f"Week {datetime.now().isocalendar()[1]}"
-
         await database.execute(
             """
             INSERT INTO user_quality_history (user_id, week_label, quality_score, recorded_at)
@@ -996,36 +1034,17 @@ async def search_completed(
             },
         )
 
-        # 3. 일일 제출 현황 업데이트
-        await database.execute(
-            """
-            INSERT INTO daily_submissions (user_id, submission_date, submission_count, quality_score_avg)
-            VALUES (:user_id, CURRENT_DATE, 1, :quality_score)
-            ON CONFLICT (user_id, submission_date) 
-            DO UPDATE SET 
-                submission_count = daily_submissions.submission_count + 1,
-                quality_score_avg = (
-                    (daily_submissions.quality_score_avg * daily_submissions.submission_count + :quality_score) 
-                    / (daily_submissions.submission_count + 1)
-                ),
-                created_at = CURRENT_TIMESTAMP
-            """,
-            {
-                "user_id": user_id,
-                "quality_score": request.quality_score,
-            },
-        )
+        # ❗️❗️❗️ REMOVED ❗️❗️❗️
+        # 아래 두 개의 카운트 업데이트 로직이 의도적으로 제거되었습니다.
+        # - daily_submissions 업데이트
+        # - users 테이블의 submission_count 업데이트
 
-        # 4. 사용자의 총 제출 수 업데이트
-        await database.execute(
-            "UPDATE users SET submission_count = submission_count + 1 WHERE id = :user_id",
-            {"user_id": user_id},
+        print(
+            f"✅ Search data saved for user {user_id}. Submission count is not affected."
         )
-
-        print(f"✅ Search data saved for user {user_id}")
         return {
             "success": True,
-            "message": "검색 데이터가 저장되었습니다.",
+            "message": "검색 데이터가 저장되었습니다. 제출 횟수는 변경되지 않습니다.",
             "user_id": user_id,
         }
 
@@ -1122,6 +1141,192 @@ async def auction_completed(
     except Exception as e:
         print(f"❌ Auction completed error for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/reset-password")
+async def reset_password(request: Request):
+    """비밀번호 재설정 (개발용)"""
+    try:
+        body = await request.json()
+        email = body.get("email")
+        new_password = body.get("new_password")
+
+        if not email or not new_password:
+            raise HTTPException(
+                status_code=400, detail="이메일과 새 비밀번호가 필요합니다."
+            )
+
+        # 사용자 확인
+        user = await database.fetch_one(
+            "SELECT id, email FROM users WHERE email = :email", {"email": email}
+        )
+
+        if not user:
+            raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+        # 새 비밀번호 해시
+        hashed_password = get_password_hash(new_password)
+
+        # 비밀번호 업데이트
+        await database.execute(
+            "UPDATE users SET hashed_password = :hashed_password WHERE email = :email",
+            {"hashed_password": hashed_password, "email": email},
+        )
+
+        return {"success": True, "message": "비밀번호가 성공적으로 재설정되었습니다."}
+
+    except Exception as e:
+        print(f"비밀번호 재설정 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/transactions/record")
+async def record_tx(body: TxRecord):
+    """거래 수신 엔드포인트 (payment-service 호출 수신)"""
+    try:
+        print(f"📝 Transaction record received: {body.dict()}")
+
+        # 필요 시 로컬 캐시/미러 테이블에 반영 (선택적)
+        # 현재는 단순히 수신 확인만 함
+        print(f"✅ Transaction recorded for user {body.userId}: {body.transactionId}")
+
+        return {"ok": True}
+
+    except Exception as e:
+        print(f"❌ Transaction record error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/user/earnings", status_code=201)
+async def create_user_earnings_api(
+    request: DetailedEarningsRequest, current_user: dict = Depends(get_current_user)
+):
+    """
+    광고 클릭 시 수익을 생성합니다. (멱등성 보장, 트랜잭션 기준 사용량 계산)
+    - 동일한 (user_id, search_id, bid_id) 조합이 있으면 기존 트랜잭션 반환
+    - 일일 제출 한도를 초과하면 에러를 반환합니다.
+    - 모든 DB 작업은 트랜잭션으로 처리됩니다.
+    """
+    user_id = current_user["id"]
+    user_quality_score = current_user.get("quality_score", 75)
+    submission_limit = calculate_dynamic_limit(user_quality_score).dailyMax
+
+    try:
+        # 멱등성 체크: 동일한 (user_id, search_id, bid_id) 조합이 오늘 이미 존재하는지 확인
+        existing = None
+        if request.searchId and request.bidId:
+            existing = await database.fetch_one(
+                """
+                SELECT *
+                FROM transactions
+                WHERE user_id = :uid AND search_id = :sid AND bid_id = :bid
+                  AND created_at::date = CURRENT_DATE
+                """,
+                {"uid": user_id, "sid": request.searchId, "bid": request.bidId},
+            )
+
+        if existing:
+            # 기존 트랜잭션이 있으면 그대로 반환 (멱등성)
+            daily_after = await _remaining_from_tx(user_id)
+            print(f"🔄 Returning existing transaction for user {user_id} (idempotent)")
+            return {
+                "success": True,
+                "message": "기존 트랜잭션을 반환합니다(멱등).",
+                "transaction": dict(existing),
+                "user_id": user_id,
+                "amount": existing["primary_reward"],
+                "dailySubmission": daily_after,
+            }
+
+        # 트랜잭션 기준으로 현재 사용량 확인
+        current_used = await _used_today_from_tx(user_id)
+
+        # 한도 초과 확인
+        if current_used >= submission_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"일일 제출 한도({submission_limit}회)를 초과했습니다. 내일 다시 시도해주세요.",
+            )
+
+        # 신규 트랜잭션 생성
+        amount = request.amount
+        query = request.query or "광고 클릭 보상"
+        ad_type = request.adType or "unknown"
+        search_id = request.searchId or ""
+        bid_id = request.bidId or ""
+
+        print(
+            f"💰 Creating new earnings for user {user_id} (Count: {current_used+1}/{submission_limit})"
+        )
+
+        transaction_id = (
+            f"txn_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
+        )
+
+        # DB 작업을 트랜잭션으로 묶어 데이터 정합성을 보장
+        async with database.transaction():
+            await database.execute(
+                """
+                INSERT INTO transactions (
+                    id, user_id, query_text, buyer_name, primary_reward, status, 
+                    source, search_id, bid_id, ad_type
+                )
+                VALUES (
+                    :id, :user_id, :query_text, :buyer_name, :primary_reward, '1차 완료', 
+                    'PLATFORM', :search_id, :bid_id, :ad_type
+                )
+                """,
+                {
+                    "id": transaction_id,
+                    "user_id": user_id,
+                    "query_text": query,
+                    "buyer_name": "시스템",
+                    "primary_reward": amount,
+                    "search_id": search_id,
+                    "bid_id": bid_id,
+                    "ad_type": ad_type,
+                },
+            )
+
+            # 사용자의 총 수익 업데이트
+            await database.execute(
+                "UPDATE users SET total_earnings = total_earnings + :amount WHERE id = :user_id",
+                {"amount": amount, "user_id": user_id},
+            )
+
+        # 생성된 트랜잭션 조회
+        created_transaction = await database.fetch_one(
+            "SELECT * FROM transactions WHERE id = :transaction_id",
+            {"transaction_id": transaction_id},
+        )
+
+        # 트랜잭션 기준으로 업데이트된 사용량 계산
+        daily_after = await _remaining_from_tx(user_id)
+
+        print(f"✅ Successfully processed earnings transaction: {transaction_id}")
+        return {
+            "success": True,
+            "message": "수익이 성공적으로 기록되었습니다.",
+            "transaction": dict(created_transaction) if created_transaction else None,
+            "user_id": user_id,
+            "amount": amount,
+            "dailySubmission": daily_after,
+        }
+
+    except HTTPException as http_exc:
+        # 한도 초과 예외는 그대로 전달
+        print(f"🚫 Limit exceeded for user {user_id}: {http_exc.detail}")
+        raise http_exc
+    except Exception as e:
+        # 그 외 모든 예외는 서버 오류로 처리
+        print(f"❌ Critical error in /api/user/earnings for user {user_id}: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"수익 기록 중 서버 오류가 발생했습니다: {str(e)}",
+        )
 
 
 @app.get("/health")
