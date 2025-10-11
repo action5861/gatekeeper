@@ -2,7 +2,7 @@
 
 'use client'
 
-import { BarChart3, Building2, ChevronDown, LogOut, TrendingUp, User } from 'lucide-react'
+import { BarChart3, Building2, ChevronDown, HelpCircle, LogOut, TrendingUp, User } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useRef, useState } from 'react'
@@ -23,6 +23,11 @@ export default function Header() {
       name: 'Dashboard',
       href: '/dashboard',
       icon: BarChart3
+    },
+    {
+      name: 'How It Works',
+      href: '/how-it-works',
+      icon: HelpCircle
     }
   ]
 
