@@ -223,11 +223,10 @@ export default function Home() {
         {/* Hero Section */}
         <section className="text-center mb-12 animate-fadeInUp">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-blue-400 via-green-400 to-purple-400 bg-clip-text text-transparent">
-            Trade Your Search Data
+            의도를 상장하고, 접근권을 거래하세요
           </h2>
           <p className="text-xl text-slate-300 max-w-3xl mx-auto leading-relaxed">
-            Transform your search queries into valuable assets. Get real-time bids from data buyers
-            and earn rewards for your digital footprint.
+            검색 행위를 &apos;데이터 자산&apos;이 아닌 &apos;세션형 의도 접근권&apos;으로 전환합니다. 실시간 주문북에서 매수자와 체결되고, 검증 후 정산까지 자동으로 처리됩니다.
           </p>
         </section>
 
@@ -236,7 +235,7 @@ export default function Home() {
           {/* Search Input Component - 항상 표시 */}
           <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
             <h3 className="text-2xl font-semibold mb-6 text-slate-100 text-center">
-              Search Input Component
+              의도 상장 입력
             </h3>
             <SearchInput
               onQueryChange={handleQueryChange}
@@ -288,7 +287,7 @@ export default function Home() {
         {/* Footer */}
         <footer className="mt-16 text-center text-slate-400 animate-fadeIn animation-delay-400">
           <p className="text-sm">
-            © 2024 Real-time Search Data Exchange. All rights reserved.
+            © 2025 Intendex. All rights reserved.
           </p>
         </footer>
       </main>

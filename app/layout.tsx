@@ -8,7 +8,7 @@ import { Providers } from './providers'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'Real-time Search Data Exchange',
+  title: 'Intendex – Real-time Intent Exchange',
   description: 'A platform for real-time search data trading and auction',
 }
 

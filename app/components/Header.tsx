@@ -15,12 +15,12 @@ export default function Header() {
 
   const navItems = [
     {
-      name: 'Exchange',
+      name: '거래소',
       href: '/',
       icon: TrendingUp
     },
     {
-      name: 'Dashboard',
+      name: '대시보드',
       href: '/dashboard',
       icon: BarChart3
     }
@@ -73,7 +73,7 @@ export default function Header() {
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">
-              Real-time Search Data Exchange
+              Intendex – Real-time Intent Exchange
             </h1>
           </div>
 
@@ -107,7 +107,7 @@ export default function Header() {
                   className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 text-slate-300 hover:text-white hover:bg-red-600"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span className="font-medium">Logout</span>
+                  <span className="font-medium">로그아웃</span>
                 </button>
               </div>
             ) : (
