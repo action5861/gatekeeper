@@ -9,7 +9,6 @@ import SearchInput from '@/components/main/SearchInput'
 import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth'
 import { useDebounce } from '@/lib/hooks/useDebounce'
 import { Auction, QualityReport } from '@/lib/types'
-import { Eye, FileText, Lock, Shield } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 export default function Home() {
@@ -243,75 +242,6 @@ export default function Home() {
               onSearchSubmit={handleSearchSubmit}
               isLoading={isLoading}
             />
-          </section>
-
-          {/* Feature Cards Section */}
-          <section className="animate-fadeInUp">
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {/* Card 1: Transparent Pricing */}
-              <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 hover:border-blue-500/50 transition-all duration-300 hover:transform hover:scale-105">
-                <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-green-500 rounded-lg flex items-center justify-center mb-4">
-                  <Eye className="w-6 h-6 text-white" />
-                </div>
-                <h3 className="text-lg font-bold text-slate-100 mb-2">
-                  Transparent Pricing
-                </h3>
-                <p className="text-sm font-semibold text-blue-400 mb-3">
-                  See What Your Intent Is Worth
-                </p>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  Real-time orderbook shows actual bids from advertisers competing for your attention.
-                </p>
-              </div>
-
-              {/* Card 2: Quality Verified */}
-              <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 hover:border-green-500/50 transition-all duration-300 hover:transform hover:scale-105">
-                <div className="w-12 h-12 bg-gradient-to-r from-green-500 to-blue-500 rounded-lg flex items-center justify-center mb-4">
-                  <Shield className="w-6 h-6 text-white" />
-                </div>
-                <h3 className="text-lg font-bold text-slate-100 mb-2">
-                  Quality Verified
-                </h3>
-                <p className="text-sm font-semibold text-green-400 mb-3">
-                  Get Paid Only When You Actually Engage
-                </p>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  Our SDK measures visibility, focus, and dwell time—failed quality means auto-refund to advertisers, zero for you.
-                </p>
-              </div>
-
-              {/* Card 3: Privacy First */}
-              <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 hover:border-purple-500/50 transition-all duration-300 hover:transform hover:scale-105">
-                <div className="w-12 h-12 bg-gradient-to-r from-purple-500 to-blue-500 rounded-lg flex items-center justify-center mb-4">
-                  <Lock className="w-6 h-6 text-white" />
-                </div>
-                <h3 className="text-lg font-bold text-slate-100 mb-2">
-                  Privacy First
-                </h3>
-                <p className="text-sm font-semibold text-purple-400 mb-3">
-                  Access Rights, Not Data Ownership
-                </p>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  We never capture screens or content—only session-based exposure metrics with HMAC verification.
-                </p>
-              </div>
-
-              {/* Card 4: Settlement by Proof */}
-              <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 hover:border-yellow-500/50 transition-all duration-300 hover:transform hover:scale-105">
-                <div className="w-12 h-12 bg-gradient-to-r from-yellow-500 to-green-500 rounded-lg flex items-center justify-center mb-4">
-                  <FileText className="w-6 h-6 text-white" />
-                </div>
-                <h3 className="text-lg font-bold text-slate-100 mb-2">
-                  Settlement by Proof
-                </h3>
-                <p className="text-sm font-semibold text-yellow-400 mb-3">
-                  This Isn&apos;t a Reward. It&apos;s a Transaction.
-                </p>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  SLA verification determines PASSED (full payment), PARTIAL (prorated), or FAILED (refund). All logged for audit.
-                </p>
-              </div>
-            </div>
           </section>
 
           {/* Quality Advisor Component - 검색어 입력 시 표시 */}
