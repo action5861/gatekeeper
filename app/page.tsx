@@ -233,8 +233,8 @@ export default function Home() {
         {/* Main Components Area */}
         <div className="space-y-8 animate-fadeInUp animation-delay-200">
           {/* Search Input Component - 항상 표시 */}
-          <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
-            <h3 className="text-2xl font-semibold mb-6 text-slate-100 text-center">
+          <section className="bg-slate-800/50 rounded-xl p-8 md:p-12 border border-slate-700">
+            <h3 className="text-3xl md:text-4xl font-bold mb-8 text-slate-100 text-center">
               List Your Intent
             </h3>
             <SearchInput
