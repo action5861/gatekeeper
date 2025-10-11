@@ -15,12 +15,12 @@ export default function Header() {
 
   const navItems = [
     {
-      name: '거래소',
+      name: 'Exchange',
       href: '/',
       icon: TrendingUp
     },
     {
-      name: '대시보드',
+      name: 'Dashboard',
       href: '/dashboard',
       icon: BarChart3
     }
@@ -107,7 +107,7 @@ export default function Header() {
                   className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 text-slate-300 hover:text-white hover:bg-red-600"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span className="font-medium">로그아웃</span>
+                  <span className="font-medium">Logout</span>
                 </button>
               </div>
             ) : (

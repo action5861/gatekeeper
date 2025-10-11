@@ -2,8 +2,8 @@
 
 'use client'
 
-import { useState } from 'react'
 import { Search, TrendingUp } from 'lucide-react'
+import { useState } from 'react'
 
 interface SearchInputProps {
   onQueryChange: (query: string) => void
@@ -39,7 +39,7 @@ export default function SearchInput({ onQueryChange, onSearchSubmit, isLoading =
             type="text"
             value={query}
             onChange={handleInputChange}
-            placeholder="의도를 입력하세요 (예: '아이폰 17 자급제 최저가 비교')"
+            placeholder="Enter your search intent (e.g., 'iPhone 15 Pro Max best price')"
             className="block w-full pl-10 pr-4 py-3 border border-slate-600 rounded-lg bg-slate-800 text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
             disabled={isLoading}
           />
@@ -59,7 +59,7 @@ export default function SearchInput({ onQueryChange, onSearchSubmit, isLoading =
           ) : (
             <>
               <TrendingUp className="h-5 w-5" />
-              <span>상장 & 가치평가 시작</span>
+              <span>List & Start Auction</span>
             </>
           )}
         </button>
@@ -68,7 +68,7 @@ export default function SearchInput({ onQueryChange, onSearchSubmit, isLoading =
       {/* Helper Text */}
       <div className="mt-4 text-center">
         <p className="text-sm text-slate-400">
-          Tip: 가격·브랜드·리뷰 등 상업 신호를 포함하면 품질 점수와 체결가가 상승합니다.
+          Tip: Include commercial signals like price, brand, or review to boost quality score and bid value.
         </p>
       </div>
     </div>
