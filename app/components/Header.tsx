@@ -73,7 +73,7 @@ export default function Header() {
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">
-              Intendex – Real-time Intent Exchange
+              Intendex
             </h1>
           </div>
 
