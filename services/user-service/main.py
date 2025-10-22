@@ -528,7 +528,17 @@ async def login_for_access_token(form_data: UserLogin):
         print("🎫 Creating access token...")
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user["email"]}, expires_delta=access_token_expires
+            data={
+                "sub": user["email"],
+                "user_id": user["id"],
+                "username": (
+                    user["username"]
+                    if "username" in user
+                    else user["email"].split("@")[0]
+                ),
+                "userType": "user",
+            },
+            expires_delta=access_token_expires,
         )
         print("✅ Login successful")
         return {"access_token": access_token, "token_type": "bearer"}
@@ -552,33 +562,40 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         )
 
         # 1. 실제 사용자별 수익 계산 (이번달, 지난달, 전체)
+        # ⭐ 중요: SETTLED 상태의 거래만 수익으로 계산 (PENDING_VERIFICATION 제외)
         earnings_query = """
         SELECT 
-            -- 전체 수익
-            COALESCE(SUM(primary_reward), 0) as primary_total,
-            COALESCE(SUM(secondary_reward), 0) as secondary_total,
-            COALESCE(SUM(primary_reward), 0) + COALESCE(SUM(secondary_reward), 0) as total,
+            -- 전체 수익 (정산 완료된 거래만)
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN primary_reward ELSE 0 END), 0) as primary_total,
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN secondary_reward ELSE 0 END), 0) as secondary_total,
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as total,
             
-            -- 이번달 수익
+            -- 이번달 수익 (정산 완료된 거래만)
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward ELSE 0 END), 0) as this_month_primary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN secondary_reward ELSE 0 END), 0) as this_month_secondary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as this_month_total,
             
-            -- 지난달 수익
+            -- 지난달 수익 (정산 완료된 거래만)
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward ELSE 0 END), 0) as last_month_primary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN secondary_reward ELSE 0 END), 0) as last_month_secondary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as last_month_total
         FROM transactions 
         WHERE user_id = :user_id
@@ -672,15 +689,22 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         submission_limit = calculate_dynamic_limit(quality_score)
         daily_submission = await _remaining_from_tx(user_id, quality_score)
 
-        # 5. 사용자별 거래 내역 조회
+        # 5. 사용자별 거래 내역 조회 (광고주 이름 포함)
         transactions = await database.fetch_all(
             """
-            SELECT id, query_text as query, buyer_name as "buyerName", 
-                   primary_reward as "primaryReward", secondary_reward as "secondaryReward",
-                   status, created_at as timestamp
-            FROM transactions 
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
+            SELECT 
+                t.id, 
+                t.query_text as query, 
+                COALESCE(a.company_name, t.buyer_name) as "buyerName",
+                t.primary_reward as "primaryReward", 
+                t.secondary_reward as "secondaryReward",
+                t.status, 
+                t.created_at as timestamp
+            FROM transactions t
+            LEFT JOIN bids b ON t.bid_id = b.id
+            LEFT JOIN advertisers a ON b.advertiser_id = a.id
+            WHERE t.user_id = :user_id
+            ORDER BY t.created_at DESC
             """,
             {"user_id": user_id},
         )
@@ -1080,7 +1104,7 @@ async def auction_completed(
         # 2. 선택된 입찰 정보 가져오기
         bid_info = await database.fetch_one(
             """
-            SELECT buyer_name, price, bonus_description, landing_url
+            SELECT buyer_name, price, bonus_description, landing_url, advertiser_id
             FROM bids 
             WHERE id = :bid_id
             """,
@@ -1098,12 +1122,13 @@ async def auction_completed(
         await database.execute(
             """
             INSERT INTO transactions (
-                id, user_id, auction_id, query_text, buyer_name, 
+                id, user_id, auction_id, bid_id, advertiser_id, query_text, buyer_name, 
                 primary_reward, status, created_at
             )
             VALUES (
                 :transaction_id, :user_id, 
                 (SELECT id FROM auctions WHERE search_id = :search_id),
+                :bid_id, :advertiser_id,
                 (SELECT query_text FROM auctions WHERE search_id = :search_id),
                 :buyer_name, :primary_reward, '1차 완료', CURRENT_TIMESTAMP
             )
@@ -1112,6 +1137,12 @@ async def auction_completed(
                 "transaction_id": transaction_id,
                 "user_id": user_id,
                 "search_id": request.search_id,
+                "bid_id": request.selected_bid_id,
+                "advertiser_id": (
+                    bid_info["advertiser_id"]
+                    if bid_info["advertiser_id"] is not None
+                    else None
+                ),
                 "buyer_name": bid_info["buyer_name"],
                 "primary_reward": request.reward_amount,
             },
@@ -1197,12 +1228,14 @@ async def record_tx(body: TxRecord):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/user/earnings", status_code=201)
-async def create_user_earnings_api(
+@app.post("/api/user/earnings", status_code=202)
+async def register_trade_for_verification(
     request: DetailedEarningsRequest, current_user: dict = Depends(get_current_user)
 ):
     """
-    광고 클릭 시 수익을 생성합니다. (멱등성 보장, 트랜잭션 기준 사용량 계산)
+    광고 클릭 시 거래를 'SLA 검증 대기' 상태로 등록합니다.
+    - 멱등성을 보장하며, 일일 한도를 체크합니다.
+    - 이 함수는 더 이상 사용자 잔고를 직접 업데이트하지 않습니다.
     - 동일한 (user_id, search_id, bid_id) 조합이 있으면 기존 트랜잭션 반환
     - 일일 제출 한도를 초과하면 에러를 반환합니다.
     - 모든 DB 작업은 트랜잭션으로 처리됩니다.
@@ -1231,11 +1264,12 @@ async def create_user_earnings_api(
             print(f"🔄 Returning existing transaction for user {user_id} (idempotent)")
             return {
                 "success": True,
-                "message": "기존 트랜잭션을 반환합니다(멱등).",
+                "message": "거래가 이미 등록되어 있으며, SLA 검증 대기 중입니다.",
                 "transaction": dict(existing),
                 "user_id": user_id,
                 "amount": existing["primary_reward"],
                 "dailySubmission": daily_after,
+                "trade_id": existing["bid_id"],
             }
 
         # 트랜잭션 기준으로 현재 사용량 확인
@@ -1256,7 +1290,7 @@ async def create_user_earnings_api(
         bid_id = request.bidId or ""
 
         print(
-            f"💰 Creating new earnings for user {user_id} (Count: {current_used+1}/{submission_limit})"
+            f"📝 Registering trade for verification for user {user_id} (Count: {current_used+1}/{submission_limit})"
         )
 
         transaction_id = (
@@ -1265,6 +1299,7 @@ async def create_user_earnings_api(
 
         # DB 작업을 트랜잭션으로 묶어 데이터 정합성을 보장
         async with database.transaction():
+            # 1. transactions 테이블에 'PENDING_VERIFICATION' 상태로 저장
             await database.execute(
                 """
                 INSERT INTO transactions (
@@ -1272,7 +1307,7 @@ async def create_user_earnings_api(
                     source, search_id, bid_id, ad_type
                 )
                 VALUES (
-                    :id, :user_id, :query_text, :buyer_name, :primary_reward, '1차 완료', 
+                    :id, :user_id, :query_text, :buyer_name, :primary_reward, 'PENDING_VERIFICATION', 
                     'PLATFORM', :search_id, :bid_id, :ad_type
                 )
                 """,
@@ -1287,12 +1322,7 @@ async def create_user_earnings_api(
                     "ad_type": ad_type,
                 },
             )
-
-            # 사용자의 총 수익 업데이트
-            await database.execute(
-                "UPDATE users SET total_earnings = total_earnings + :amount WHERE id = :user_id",
-                {"amount": amount, "user_id": user_id},
-            )
+            # 2. 사용자 잔고 업데이트 로직 제거됨 - Settlement Service에서 처리
 
         # 생성된 트랜잭션 조회
         created_transaction = await database.fetch_one(
@@ -1303,14 +1333,15 @@ async def create_user_earnings_api(
         # 트랜잭션 기준으로 업데이트된 사용량 계산
         daily_after = await _remaining_from_tx(user_id)
 
-        print(f"✅ Successfully processed earnings transaction: {transaction_id}")
+        print(f"✅ Successfully registered trade for verification: {transaction_id}")
         return {
             "success": True,
-            "message": "수익이 성공적으로 기록되었습니다.",
+            "message": "거래가 등록되었으며, SLA 검증 대기 중입니다.",
             "transaction": dict(created_transaction) if created_transaction else None,
             "user_id": user_id,
             "amount": amount,
             "dailySubmission": daily_after,
+            "trade_id": bid_id,  # 프론트엔드가 SLA 검증 요청에 사용할 ID
         }
 
     except HTTPException as http_exc:
@@ -1319,13 +1350,15 @@ async def create_user_earnings_api(
         raise http_exc
     except Exception as e:
         # 그 외 모든 예외는 서버 오류로 처리
-        print(f"❌ Critical error in /api/user/earnings for user {user_id}: {e}")
+        print(
+            f"❌ Critical error in register_trade_for_verification for user {user_id}: {e}"
+        )
         import traceback
 
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"수익 기록 중 서버 오류가 발생했습니다: {str(e)}",
+            detail=f"거래 등록 중 서버 오류가 발생했습니다: {str(e)}",
         )
 
 

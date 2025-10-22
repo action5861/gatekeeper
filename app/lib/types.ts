@@ -21,12 +21,22 @@ export interface Auction {
   expiresAt: Date;
 }
 
+// AI가 제안한 개선된 검색어
+export interface ImprovedQuery {
+  query: string;
+  reason: string;
+  score?: number;
+  commercialValue?: 'low' | 'medium' | 'high';
+}
+
 // 품질 분석 리포트 타입
 export interface QualityReport {
   score: number;
   suggestions: string[];
   keywords: string[];
   commercialValue: 'low' | 'medium' | 'high';
+  needsImprovement?: boolean;  // ⭐ 개선 필요 플래그
+  aiSuggestions?: ImprovedQuery[];  // ⭐ AI 개선 제안
 }
 
 // 데이터 수요자 타입

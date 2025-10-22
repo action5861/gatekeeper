@@ -6,13 +6,20 @@ from datetime import datetime, timedelta
 import random
 import asyncio
 from decimal import Decimal
+import os
+import json
 
 # HMAC 서명 import
-from utils.sign import sign_click
+from .utils.sign import sign_click
+
+REDIRECT_BASE_URL = os.getenv("REDIRECT_BASE_URL", "http://api-gateway:8000")
+
+# 최적화된 매칭 로직 import
+from .optimized_matching import OptimizedAdvertiserMatcher, OptimizedBidGenerator
 
 # Database import
 try:
-    from database import (
+    from .database import (
         database,
         SearchQuery,
         connect_to_database,
@@ -39,6 +46,26 @@ except ImportError as e:
     async def disconnect_from_database():
         await database.disconnect()
         print("Auction Service database disconnected")
+
+
+# === Tokenization & normalization utilities ===
+def _normalize(s: str) -> str:
+    """문자열을 소문자로 변환하고 모든 공백을 제거합니다."""
+    return "".join(s.lower().split())
+
+
+def build_tokens(q: str, *, max_tokens: int = 25) -> list[str]:
+    """사용자 검색어로부터 매칭에 사용할 토큰 리스트를 생성합니다."""
+    q_norm = _normalize(q)
+    tokens = set()
+    if q_norm:
+        tokens.add(q_norm)  # (1) 정규화된 전체 쿼리
+    tokens.update([t for t in q.lower().split() if t])  # (2) 공백 분리 토큰
+    if any(ord(c) > 127 for c in q):  # (3) 한글 2-gram 및 3-gram
+        for n in (2, 3):
+            if len(q_norm) >= n:
+                tokens.update([q_norm[i : i + n] for i in range(len(q_norm) - n + 1)])
+    return list(tokens)[:max_tokens]
 
 
 app = FastAPI(title="Auction Service", version="1.0.0")
@@ -74,7 +101,12 @@ class BidResponse(BaseModel):
     bonus: str
     timestamp: datetime
     landingUrl: str
-    clickUrl: str  # 새로 추가: 리다이렉트를 위한 서명된 URL
+    clickUrl: str
+    reasons: List[str] = []  # 매칭 근거 (키워드/카테고리 등)
+    matchScore: float | None = None  # 매칭 점수(로깅용)
+    advertiserId: int | None = (
+        None  # 예산/정산을 위한 광고주 식별자 (플랫폼 폴백은 0 또는 None)
+    )
 
 
 class AuctionResponse(BaseModel):
@@ -120,196 +152,180 @@ class AuctionStatusResponse(BaseModel):
 # --- 1. 광고주 매칭 알고리즘 ---
 
 
+# === Batched SQL queries for matching (EXACT/PHRASE/BROAD + CATEGORY) ===
+EXACT_SQL = """
+SELECT advertiser_id, keyword, priority, match_type
+FROM advertiser_keywords
+WHERE match_type = 'exact'
+  AND lower(replace(keyword, ' ', '')) = ANY(:tokens_norm)
+"""
+
+# NOTE: PHRASE는 부분 문구 포함을 허용하도록 EXACT와 다르게 보강
+PHRASE_SQL = """
+SELECT advertiser_id, keyword, priority, match_type
+FROM advertiser_keywords
+WHERE match_type = 'phrase'
+  AND (
+        lower(replace(keyword, ' ', '')) = ANY(:tokens_norm)
+     OR EXISTS (
+          SELECT 1 FROM unnest(:tokens_norm) t(tok)
+          WHERE lower(replace(keyword, ' ', '')) LIKE '%' || tok || '%'
+             OR tok LIKE '%' || lower(replace(keyword, ' ', '')) || '%'
+     )
+  )
+"""
+
+BROAD_SQL = """
+SELECT advertiser_id, keyword, priority, match_type
+FROM advertiser_keywords
+WHERE match_type = 'broad'
+  AND EXISTS (
+      SELECT 1 FROM unnest(:tokens_like) t(tok)
+      WHERE lower(keyword) LIKE t.tok
+  )
+"""
+
+CATEGORY_SQL = """
+WITH matched_categories AS (
+    SELECT DISTINCT path
+    FROM business_categories
+    WHERE is_active = true
+      AND EXISTS (
+          SELECT 1 FROM unnest(:tokens_like) t(tok)
+          WHERE lower(name) LIKE t.tok
+      )
+)
+SELECT ac.advertiser_id, ac.category_path, ac.is_primary
+FROM advertiser_categories ac
+JOIN matched_categories mc ON ac.category_path LIKE mc.path || '%'
+"""
+
+SCORES = {"exact": 1.0, "phrase": 0.85, "broad": 0.7}
+SCORE_CAP = 3.0  # 최대 점수 상한
+
+
+def _ensure_aggregator(agg: dict, adv_id: int):
+    if adv_id not in agg:
+        agg[adv_id] = {"score": 0.0, "reasons": [], "seen_keys": set()}
+
+
+def _add_keyword_score(
+    agg: dict, adv_id: int, match_type: str, priority: int, keyword: str
+):
+    _ensure_aggregator(agg, adv_id)
+    seen_key = f"{match_type}:{keyword}"
+    if seen_key in agg[adv_id]["seen_keys"]:
+        return
+    base_score = SCORES.get(match_type, 0.5)
+    priority_weight = 1.0 + (min(max(priority or 1, 1), 5) / 10.0)  # 1.1~1.5
+    increment = base_score * priority_weight
+    agg[adv_id]["score"] = min(agg[adv_id]["score"] + increment, SCORE_CAP)
+    agg[adv_id]["seen_keys"].add(seen_key)
+    agg[adv_id]["reasons"].append(f"KW_{match_type.upper()}:{keyword}")
+
+
 async def find_matching_advertisers(
     search_query: str, quality_score: int
 ) -> List[Dict[str, Any]]:
     """
-    주어진 검색 쿼리 및 품질 점수와 일치하는 광고주를 찾고 매칭 점수를 계산합니다.
-
-    Args:
-        search_query (str): 사용자가 입력한 검색 쿼리.
-        quality_score (int): 검색 쿼리의 품질 점수.
-
-    Returns:
-        List[Dict[str, Any]]: 매칭된 광고주 정보와 점수가 포함된 리스트.
-                               (예: [{'advertiser_id': 1, 'match_score': 0.95}, ...])
+    주어진 검색 쿼리에 대한 광고주 매칭(배치 쿼리, N+1 제거)
     """
-    # 한글 검색어 처리를 위한 토큰화 개선
-    search_tokens = set()
+    raw_tokens = build_tokens(search_query)
+    if not raw_tokens:
+        return []
 
-    # 1. 전체 검색어를 하나의 토큰으로 추가
-    search_tokens.add(search_query.lower())
-
-    # 2. 공백으로 분리된 토큰들 추가 (영어, 숫자 등)
-    search_tokens.update(search_query.lower().split())
-
-    # 3. 한글 검색어의 경우 부분 문자열도 토큰으로 추가 (2글자 이상)
-    if any(ord(char) > 127 for char in search_query):  # 한글이 포함된 경우
-        for i in range(len(search_query) - 1):
-            for j in range(i + 2, len(search_query) + 1):
-                token = search_query[i:j].lower()
-                if len(token) >= 2:
-                    search_tokens.add(token)
-
-    print(f"🔍 검색 토큰: {search_tokens}")
-    matched_advertisers = {}
-
-    # --- 매칭 전략 1: 직접 키워드 매칭 (가중치: 1.0) ---
-    # 광고주가 등록한 키워드와 검색 쿼리를 비교합니다.
-    keyword_match_query = """
-        SELECT advertiser_id, keyword, priority, match_type
-        FROM advertiser_keywords
-        WHERE keyword = ANY(:keywords)
-    """
-    db_keywords = await database.fetch_all(
-        keyword_match_query, values={"keywords": list(search_tokens)}
+    tokens_norm = list(
+        set([_normalize(t) for t in raw_tokens] + [_normalize(search_query)])
     )
+    tokens_like = list(set([f"%{t}%" for t in raw_tokens if len(t) >= 2]))
 
-    for row in db_keywords:
-        advertiser_id = row["advertiser_id"]
-        if advertiser_id not in matched_advertisers:
-            matched_advertisers[advertiser_id] = {"score": 0, "reasons": []}
+    aggregator: Dict[int, Dict[str, Any]] = {}
 
-        # 매치 타입 및 우선순위에 따른 점수 차등 부여
-        score_boost = 0
-        if row["match_type"] == "exact":
-            score_boost = 1.0
-        elif row["match_type"] == "phrase":
-            score_boost = 0.85
-        elif row["match_type"] == "broad":
-            score_boost = 0.7
-
-        # 우선순위(1~5)를 가중치로 변환 (5가 가장 높음)
-        priority_weight = 1 + (row["priority"] / 10.0)
-        final_score = score_boost * priority_weight
-
-        matched_advertisers[advertiser_id]["score"] += final_score
-        matched_advertisers[advertiser_id]["reasons"].append(
-            f"키워드 매칭: {row['keyword']} ({row['match_type']})"
-        )
-
-    # --- 매칭 전략 2: 카테고리 매칭 (가중치: 0.6) ---
-    # 검색 쿼리에서 카테고리를 추론하고, 해당 카테고리를 등록한 광고주를 찾습니다.
-    # (실제 구현에서는 NLP 모델을 사용하여 카테고리를 추론하는 것이 이상적입니다.)
-    # 여기서는 예시로 검색어 토큰이 카테고리명에 포함되는 경우를 확인합니다.
-
-    # 모든 비즈니스 카테고리 정보를 가져옵니다.
-    all_categories_query = (
-        "SELECT id, name, path, level FROM business_categories WHERE is_active = true"
+    # 1) 키워드 매칭 3종 병렬 실행
+    exact_rows, phrase_rows, broad_rows = await asyncio.gather(
+        database.fetch_all(EXACT_SQL, {"tokens_norm": tokens_norm}),
+        database.fetch_all(PHRASE_SQL, {"tokens_norm": tokens_norm}),
+        database.fetch_all(BROAD_SQL, {"tokens_like": tokens_like}),
     )
-    all_categories = await database.fetch_all(all_categories_query)
-
-    matched_category_paths = []
-    for token in search_tokens:
-        for category in all_categories:
-            if token in category["name"].lower():
-                # 하위 카테고리까지 모두 포함
-                path_prefix = category["path"]
-                for cat in all_categories:
-                    if cat["path"].startswith(path_prefix):
-                        matched_category_paths.append(cat["path"])
-
-    if matched_category_paths:
-        category_match_query = """
-            SELECT advertiser_id, category_path, is_primary
-            FROM advertiser_categories
-            WHERE category_path = ANY(:paths)
-        """
-        db_categories = await database.fetch_all(
-            category_match_query, values={"paths": list(set(matched_category_paths))}
-        )
-
-        for row in db_categories:
-            advertiser_id = row["advertiser_id"]
-            if advertiser_id not in matched_advertisers:
-                matched_advertisers[advertiser_id] = {"score": 0, "reasons": []}
-
-            # 기본 점수에 is_primary 여부로 가중치 추가
-            category_score = 0.6 * (1.2 if row["is_primary"] else 1.0)
-            matched_advertisers[advertiser_id]["score"] += category_score
-            matched_advertisers[advertiser_id]["reasons"].append(
-                f"카테고리 매칭: {row['category_path']}"
+    for rows in (exact_rows, phrase_rows, broad_rows):
+        for r in rows:
+            _add_keyword_score(
+                aggregator,
+                r["advertiser_id"],
+                r["match_type"],
+                r["priority"],
+                r["keyword"],
             )
 
-    # --- 최종 필터링 및 정렬 ---
-    # 자동 입찰이 활성화된 광고주만 대상으로 필터링합니다.
-    final_advertisers = []
-    if matched_advertisers:
-        advertiser_ids = list(matched_advertisers.keys())
-        auto_bid_settings_query = """
-            SELECT advertiser_id, min_quality_score
-            FROM auto_bid_settings
-            WHERE advertiser_id = ANY(:advertiser_ids) AND is_enabled = true
-        """
-        enabled_advertisers = await database.fetch_all(
-            auto_bid_settings_query, values={"advertiser_ids": advertiser_ids}
-        )
-
-        for row in enabled_advertisers:
-            # 검색 쿼리의 품질 점수가 광고주 설정 기준 이상인 경우에만 최종 후보에 포함
-            if quality_score >= row["min_quality_score"]:
-                final_advertisers.append(
-                    {
-                        "advertiser_id": row["advertiser_id"],
-                        "match_score": matched_advertisers[row["advertiser_id"]][
-                            "score"
-                        ],
-                        "reasons": matched_advertisers[row["advertiser_id"]]["reasons"],
-                    }
+    # 2) 카테고리 매칭
+    if tokens_like:
+        rows_cat = await database.fetch_all(CATEGORY_SQL, {"tokens_like": tokens_like})
+        for r in rows_cat:
+            adv_id = r["advertiser_id"]
+            _ensure_aggregator(aggregator, adv_id)
+            cat_score = 0.6 * (1.2 if r["is_primary"] else 1.0)
+            seen_key = f"CAT:{r['category_path']}"
+            if seen_key not in aggregator[adv_id]["seen_keys"]:
+                aggregator[adv_id]["score"] = min(
+                    aggregator[adv_id]["score"] + cat_score, SCORE_CAP
                 )
+                aggregator[adv_id]["seen_keys"].add(seen_key)
+                aggregator[adv_id]["reasons"].append(seen_key)
 
-    # 매칭 점수가 높은 순으로 정렬
+    if not aggregator:
+        return []
+
+    # 3) 자동 입찰 설정 일괄 조회
+    advertiser_ids = list(aggregator.keys())
+    abs_query = """
+        SELECT advertiser_id, min_quality_score
+        FROM auto_bid_settings
+        WHERE advertiser_id = ANY(:ids) AND is_enabled = true
+    """
+    abs_rows = await database.fetch_all(abs_query, {"ids": advertiser_ids})
+    abs_map = {r["advertiser_id"]: r for r in abs_rows}
+
+    # 4) 정책 필터링 및 정렬
+    final_advertisers = []
+    for adv_id, data in aggregator.items():
+        settings = abs_map.get(adv_id)
+        if not settings:
+            continue
+        match_score = data["score"]
+        passes = (match_score >= 0.8) or (
+            quality_score >= settings["min_quality_score"]
+        )
+        if passes:
+            final_advertisers.append(
+                {
+                    "advertiser_id": adv_id,
+                    "match_score": match_score,
+                    "reasons": data["reasons"],
+                }
+            )
+
     return sorted(final_advertisers, key=lambda x: x["match_score"], reverse=True)
 
 
 # --- 2. 자동 입찰가 계산 알고리즘 ---
 
 
-async def calculate_auto_bid_price(advertiser_id: int, match_score: float) -> int:
+async def calculate_auto_bid_price(
+    match_score: float, settings: Dict[str, Any], review: Dict[str, Any] | None
+) -> int:
     """
-    매칭 점수와 광고주 설정을 기반으로 최적의 입찰가를 동적으로 계산합니다.
-
-    Args:
-        advertiser_id (int): 광고주 ID.
-        match_score (float): find_matching_advertisers에서 계산된 매칭 점수.
-
-    Returns:
-        int: 계산된 최종 입찰가.
+    매칭 점수와 광고주 설정을 기반으로 최적 입찰가 계산 (DB 조회 없음)
     """
-    settings_query = """
-        SELECT daily_budget, max_bid_per_keyword
-        FROM auto_bid_settings
-        WHERE advertiser_id = :advertiser_id
-    """
-    settings = await database.fetch_one(
-        settings_query, values={"advertiser_id": advertiser_id}
-    )
-
     if not settings:
         return 0
-
-    # 기본 입찰가 = 최대 입찰가의 (매칭 점수)%
-    # 매칭 점수가 1.0이면 최대 입찰가의 100%를, 0.5이면 50%를 기본 입찰가로 설정
     base_bid = int(settings["max_bid_per_keyword"] * min(match_score, 1.0))
-
-    # 광고주 심사 결과에 따른 입찰가 조정 (가산점/감점)
-    review_query = """
-        SELECT recommended_bid_min, recommended_bid_max
-        FROM advertiser_reviews
-        WHERE advertiser_id = :advertiser_id AND review_status = 'approved'
-    """
-    review = await database.fetch_one(
-        review_query, values={"advertiser_id": advertiser_id}
-    )
-
     final_bid = base_bid
     if review:
-        # 추천 입찰가 범위 내에서 최종 입찰가 조정
         final_bid = max(
-            review["recommended_bid_min"], min(final_bid, review["recommended_bid_max"])
+            review.get("recommended_bid_min", 0),
+            min(final_bid, review.get("recommended_bid_max", final_bid)),
         )
-
-    return final_bid
+    return max(final_bid, 0)
 
 
 # --- 3. 예산 확인 로직 ---
@@ -317,45 +333,25 @@ async def calculate_auto_bid_price(advertiser_id: int, match_score: float) -> in
 
 async def check_budget_availability(advertiser_id: int, bid_amount: int) -> bool:
     """
-    광고주의 현재 예산으로 입찰이 가능한지 확인합니다.
-
-    Args:
-        advertiser_id (int): 광고주 ID.
-        bid_amount (int): 입찰할 금액.
-
-    Returns:
-        bool: 입찰 가능 여부.
+    광고주의 현재 예산으로 입찰 가능 여부 확인 (KST 자정 기준)
     """
-    # 오늘 하루 동안 해당 광고주가 지출한 총액을 계산
-    today_spend_query = """
-        SELECT SUM(price) as total_spent
+    spend_query = """
+        SELECT COALESCE(SUM(price), 0) AS total_spent
         FROM bids
-        WHERE buyer_name = (SELECT company_name FROM advertisers WHERE id = :advertiser_id)
-          AND created_at >= current_date
+        WHERE advertiser_id = :advertiser_id
+          AND created_at >= (date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
     """
-    result = await database.fetch_one(
-        today_spend_query, values={"advertiser_id": advertiser_id}
-    )
-    total_spent_today = result["total_spent"] if result and result["total_spent"] else 0
+    result = await database.fetch_one(spend_query, {"advertiser_id": advertiser_id})
+    total_spent_today = result["total_spent"] if result else 0
 
-    # 광고주의 일일 예산 한도를 가져옴
     budget_query = "SELECT daily_budget FROM auto_bid_settings WHERE advertiser_id = :advertiser_id"
     budget_settings = await database.fetch_one(
-        budget_query, values={"advertiser_id": advertiser_id}
+        budget_query, {"advertiser_id": advertiser_id}
     )
-
     if not budget_settings:
         return False
 
-    # (총 지출액 + 이번 입찰금액)이 일일 예산을 초과하는지 확인
-    if (total_spent_today + bid_amount) > budget_settings["daily_budget"]:
-        print(f"광고주 {advertiser_id}: 일일 예산 초과로 입찰 불가")
-        return False
-
-    # TODO: 실제 예치금 잔액 확인 로직 추가
-    # 예: payment_service 와의 연동을 통해 실제 출금 가능한 잔액 확인
-
-    return True
+    return (total_spent_today + bid_amount) <= budget_settings["daily_budget"]
 
 
 # --- 4. 실제 광고주 자동 입찰 생성 ---
@@ -365,96 +361,94 @@ async def generate_real_advertiser_bids(
     search_query: str, quality_score: int
 ) -> List[BidResponse]:
     """
-    실제 광고주들의 자동 입찰을 생성합니다.
-    (수정 버전: 매칭 실패 시 플랫폼 입찰을 확실히 반환)
+    실제 광고주 자동 입찰 생성 (N+1 제거, 점수/사유 전달)
     """
-    print(
-        f"--- 검색어 '{search_query}' (품질 점수: {quality_score})에 대한 실제 광고주 매칭 시작 ---"
-    )
+    print(f"--- 검색어 '{search_query}' (품질 점수: {quality_score}) 매칭 시작 ---")
 
-    # 1. 매칭되는 광고주 찾기
     matching_advertisers = await find_matching_advertisers(search_query, quality_score)
-
-    # 2. 매칭 실패 시 즉시 플랫폼 사업자 입찰 생성 및 반환
     if not matching_advertisers:
-        print(">> 매칭되는 광고주가 없습니다. 플랫폼 사업자 고정 적립을 제공합니다.")
-        platform_bids = generate_platform_fallback_bids(search_query, quality_score)
-        print(f">> 플랫폼 폴백 입찰 {len(platform_bids)}개 생성 완료")
+        print(">> 매칭 광고주 없음 → 플랫폼 폴백 반환")
+        return generate_platform_fallback_bids(search_query, quality_score)
 
-        # 여기서 바로 반환해야 함
-        return platform_bids
+    advertiser_ids = [m["advertiser_id"] for m in matching_advertisers]
+    details_query = """
+        SELECT 
+            a.id as advertiser_id, a.company_name, a.website_url,
+            abs.daily_budget, abs.max_bid_per_keyword,
+            ar.recommended_bid_min, ar.recommended_bid_max
+        FROM advertisers a
+        LEFT JOIN auto_bid_settings abs ON a.id = abs.advertiser_id
+        LEFT JOIN advertiser_reviews ar ON a.id = ar.advertiser_id AND ar.review_status = 'approved'
+        WHERE a.id = ANY(:ids) AND abs.is_enabled = true
+    """
+    rows = await database.fetch_all(details_query, {"ids": advertiser_ids})
+    info_map = {r["advertiser_id"]: dict(r) for r in rows}
 
-    # 광고주가 있는 경우의 로직...
-    print(f">> 총 {len(matching_advertisers)}명의 잠재적 광고주를 찾았습니다.")
-    real_bids = []
-
-    # 3. 각 광고주별 입찰가 계산 및 예산 확인
-    for advertiser in matching_advertisers:
-        advertiser_id = advertiser["advertiser_id"]
-        match_score = advertiser["match_score"]
-
-        advertiser_info_query = "SELECT company_name, website_url FROM advertisers WHERE id = :advertiser_id"
-        advertiser_info = await database.fetch_one(
-            advertiser_info_query, values={"advertiser_id": advertiser_id}
-        )
-
-        if not advertiser_info:
+    real_bids: List[BidResponse] = []
+    for m in matching_advertisers:
+        adv_id = m["advertiser_id"]
+        match_score = m["match_score"]
+        reasons = m["reasons"]
+        info = info_map.get(adv_id)
+        if not info:
             continue
 
-        bid_price = await calculate_auto_bid_price(advertiser_id, match_score)
-
-        if bid_price > 0:
-            is_available = await check_budget_availability(advertiser_id, bid_price)
-            if is_available:
-                advertiser_info_dict = dict(advertiser_info)
-                bonus_conditions = generate_bonus_conditions_for_advertiser(
-                    advertiser_info_dict, match_score, quality_score
-                )
-
-                import uuid
-
-                bid_id = f"bid_real_{advertiser_id}_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
-
-                # clickUrl 생성 (HMAC 서명 포함)
-                bid_type = "ADVERTISER"
-                sig = sign_click(bid_id, bid_price, bid_type)
-                click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
-
-                real_bids.append(
-                    BidResponse(
-                        id=bid_id,
-                        buyerName=advertiser_info["company_name"],
-                        price=bid_price,
-                        bonus=bonus_conditions,
-                        timestamp=datetime.now(),
-                        landingUrl=advertiser_info["website_url"]
-                        or f"https://www.google.com/search?q={search_query}",
-                        clickUrl=click_url,
-                    )
-                )
-                print(
-                    f"   - 광고주 {advertiser_info['company_name']}: 입찰가 {bid_price}원, 매칭 점수 {match_score:.2f}"
-                )
-            else:
-                print(
-                    f"   - 광고주 {advertiser_info['company_name']}: 예산 부족으로 입찰 제외"
-                )
-        else:
-            print(
-                f"   - 광고주 {advertiser_info['company_name']}: 입찰가 0원으로 입찰 제외"
+        settings = {
+            "max_bid_per_keyword": info["max_bid_per_keyword"],
+            "daily_budget": info["daily_budget"],
+        }
+        review = (
+            {
+                "recommended_bid_min": info.get("recommended_bid_min"),
+                "recommended_bid_max": info.get("recommended_bid_max"),
+            }
+            if (
+                info.get("recommended_bid_min") is not None
+                or info.get("recommended_bid_max") is not None
             )
+            else None
+        )
 
-    # 유효한 입찰이 없으면 플랫폼 폴백
+        bid_price = await calculate_auto_bid_price(match_score, settings, review)
+        if bid_price <= 0:
+            continue
+
+        if not await check_budget_availability(adv_id, bid_price):
+            print(f"   - 광고주 {adv_id}: 예산 부족")
+            continue
+
+        import uuid
+
+        bid_id = f"bid_real_{adv_id}_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
+        sig = sign_click(bid_id, bid_price, "ADVERTISER")
+        click_url = f"{REDIRECT_BASE_URL}/api/redirect/{bid_id}?sig={sig}"
+
+        real_bids.append(
+            BidResponse(
+                id=bid_id,
+                buyerName=info["company_name"],
+                price=bid_price,
+                bonus=generate_bonus_conditions_for_advertiser(
+                    info, match_score, quality_score
+                ),
+                timestamp=datetime.now(),
+                landingUrl=info["website_url"]
+                or f"https://www.google.com/search?q={search_query}",
+                clickUrl=click_url,
+                reasons=reasons,
+                matchScore=match_score,
+                advertiserId=adv_id,
+            )
+        )
+        print(
+            f"   - 광고주 {info['company_name']}: {bid_price}원 (점수 {match_score:.2f})"
+        )
+
     if not real_bids:
-        print(">> 유효한 입찰자가 없습니다. 플랫폼 사업자 고정 적립을 제공합니다.")
-        platform_bids = generate_platform_fallback_bids(search_query, quality_score)
-        print(f">> 플랫폼 폴백 입찰 {len(platform_bids)}개 생성 완료")
-        return platform_bids
+        print(">> 유효 입찰자 없음 → 플랫폼 폴백")
+        return generate_platform_fallback_bids(search_query, quality_score)
 
-    # 실제 입찰이 있으면 정렬해서 반환
-    sorted_bids = sorted(real_bids, key=lambda x: x.price, reverse=True)
-    print(f"--- 최종 입찰 결과: {len(sorted_bids)}개 ---")
-    return sorted_bids
+    return sorted(real_bids, key=lambda x: x.price, reverse=True)
 
 
 def generate_bonus_conditions_for_advertiser(
@@ -528,7 +522,7 @@ def generate_platform_fallback_bids(
         # clickUrl 생성 (HMAC 서명 포함)
         bid_type = "PLATFORM"
         sig = sign_click(bid_id, 200, bid_type)
-        click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+        click_url = f"{REDIRECT_BASE_URL}/api/redirect/{bid_id}?sig={sig}"
 
         fallback_bids.append(
             BidResponse(
@@ -648,7 +642,7 @@ async def generate_simulation_bids(
         # clickUrl 생성 (HMAC 서명 포함)
         bid_type = "ADVERTISER"
         sig = sign_click(bid_id, price, bid_type)
-        click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+        click_url = f"{REDIRECT_BASE_URL}/api/redirect/{bid_id}?sig={sig}"
 
         bids.append(
             BidResponse(
@@ -666,51 +660,41 @@ async def generate_simulation_bids(
 
 
 async def log_auto_bids(bids: List[BidResponse], query: str, value_score: int):
-    """자동 입찰 결과를 로그 테이블에 기록"""
+    """자동 입찰 결과를 로그 테이블에 기록 (reasons JSONB / matchScore 반영)"""
     try:
         for bid in bids:
-            # bid.id에서 advertiser_id 추출 시도 (bid_real_123_... 형식)
-            advertiser_id = 1  # 기본값
-            if bid.id.startswith("bid_real_"):
-                try:
-                    # bid_real_123_timestamp_uuid 형식에서 123 추출
-                    parts = bid.id.split("_")
-                    if len(parts) >= 3:
-                        advertiser_id = int(parts[2])
-                except (ValueError, IndexError):
-                    advertiser_id = 1  # 파싱 실패 시 기본값
+            advertiser_id = bid.advertiserId or (
+                0 if bid.id.startswith("platform_bid_") else None
+            )
+            match_score = bid.matchScore or 0.0
+            reasons_json = json.dumps(bid.reasons or [])
 
-            # auto_bid_logs 테이블에 기록
             await database.execute(
                 """
                 INSERT INTO auto_bid_logs (
                     advertiser_id, search_query, match_type, match_score, 
-                    bid_amount, bid_result, quality_score, competitor_count, created_at
+                    bid_amount, bid_result, quality_score, competitor_count, created_at, reasons
                 ) VALUES (
                     :advertiser_id, :search_query, :match_type, :match_score,
-                    :bid_amount, :bid_result, :quality_score, :competitor_count, :created_at
+                    :bid_amount, :bid_result, :quality_score, :competitor_count, :created_at, :reasons::jsonb
                 )
                 """,
                 {
                     "advertiser_id": advertiser_id,
                     "search_query": query,
-                    "match_type": "broad",  # 기본값
-                    "match_score": 0.7,  # 기본값
+                    "match_type": "complex",
+                    "match_score": match_score,
                     "bid_amount": bid.price,
-                    "bid_result": (
-                        "won" if bid.price > 500 else "lost"
-                    ),  # 시뮬레이션 결과
+                    "bid_result": ("won" if bid.price > 500 else "lost"),
                     "quality_score": value_score,
                     "competitor_count": len(bids),
                     "created_at": bid.timestamp,
+                    "reasons": reasons_json,
                 },
             )
-
         print(f"✅ Auto bid logs recorded for {len(bids)} bids")
-
     except Exception as e:
         print(f"❌ Error logging auto bids: {e}")
-        # 로깅 실패는 전체 시스템에 영향을 주지 않도록 함
 
 
 async def generate_fallback_bids(query: str, value_score: int) -> List[BidResponse]:
@@ -725,7 +709,7 @@ async def generate_fallback_bids(query: str, value_score: int) -> List[BidRespon
     bid_type = "ADVERTISER"
     price = random.randint(100, 500)
     sig = sign_click(bid_id, price, bid_type)
-    click_url = f"http://api-gateway:8000/api/redirect/{bid_id}?sig={sig}"
+    click_url = f"{REDIRECT_BASE_URL}/api/redirect/{bid_id}?sig={sig}"
 
     return [
         BidResponse(
@@ -807,9 +791,30 @@ async def start_auction(request: StartAuctionRequest):
                 "PLATFORM" if bid.id.startswith("platform_bid_") else "ADVERTISER"
             )
 
+            # 광고주 ID 조회 (ADVERTISER 타입인 경우)
+            advertiser_id = None
+            if bid_type == "ADVERTISER":
+                try:
+                    # bid_id에서 광고주 ID 추출 시도
+                    if bid.id.startswith("bid_real_"):
+                        parts = bid.id.split("_")
+                        if len(parts) >= 3:
+                            advertiser_id = int(parts[2])
+                except (ValueError, IndexError):
+                    # buyer_name으로 광고주 ID 조회
+                    try:
+                        advertiser_result = await database.fetch_one(
+                            "SELECT id FROM advertisers WHERE company_name = :company_name",
+                            {"company_name": bid.buyerName},
+                        )
+                        if advertiser_result:
+                            advertiser_id = advertiser_result["id"]
+                    except Exception:
+                        advertiser_id = None
+
             bid_query = """
-                INSERT INTO bids (id, auction_id, buyer_name, price, bonus_description, landing_url, type, user_id, dest_url)
-                VALUES (:id, :auction_id, :buyer_name, :price, :bonus_description, :landing_url, :type, :user_id, :dest_url)
+                INSERT INTO bids (id, auction_id, buyer_name, price, bonus_description, landing_url, type, user_id, dest_url, advertiser_id)
+                VALUES (:id, :auction_id, :buyer_name, :price, :bonus_description, :landing_url, :type, :user_id, :dest_url, :advertiser_id)
             """
 
             await database.execute(
@@ -824,6 +829,7 @@ async def start_auction(request: StartAuctionRequest):
                     "type": bid_type,
                     "user_id": 1,  # 하드코딩된 user_id (실제로는 JWT에서 추출)
                     "dest_url": bid.landingUrl,
+                    "advertiser_id": advertiser_id,
                 },
             )
 

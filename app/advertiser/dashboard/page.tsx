@@ -1,12 +1,13 @@
 'use client'
 
-import Header from '@/components/Header'
+import { AnalysisStatusBanner } from '@/components/advertiser/AnalysisStatusBanner'
 import ReviewStatus from '@/components/advertiser/ReviewStatus'
 import AccountSettings from '@/components/dashboard/AccountSettings'
 import BiddingSummary from '@/components/dashboard/BiddingSummary'
 import BudgetStatus from '@/components/dashboard/BudgetStatus'
 import MyBids from '@/components/dashboard/MyBids'
 import PerformanceHistory from '@/components/dashboard/PerformanceHistory'
+import Header from '@/components/Header'
 import { Clock } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
@@ -178,6 +179,9 @@ export default function AdvertiserDashboard() {
                     <h1 className="text-3xl font-bold text-slate-100 mb-2">Advertiser Dashboard</h1>
                     <p className="text-slate-400">Manage your bidding campaigns and track performance</p>
                 </div>
+
+                {/* AI Analysis Status Banner */}
+                <AnalysisStatusBanner />
 
                 {/* Review Status - Always show first */}
                 <div className="mb-8 animate-fadeInUp">

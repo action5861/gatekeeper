@@ -98,9 +98,10 @@ export async function POST(request: NextRequest) {
         // Step 3c & 3d: 광고 타입에 따른 보상 지급
         let rewardAmount = 0;
         let finalUrl = '';
+        let bidLandingUrl = ''; // 실제 광고주 landing URL 저장용
 
         if (adType === 'bidded') {
-            // 입찰 광고: 실제 입찰가를 데이터베이스에서 조회
+            // 입찰 광고: 실제 입찰가와 landing URL을 데이터베이스에서 조회
             try {
                 console.log(`[SERVER LOG] Getting bid information for bidId: ${bidId}`);
 
@@ -115,7 +116,9 @@ export async function POST(request: NextRequest) {
                 if (bidResponse.ok) {
                     const bidData = await bidResponse.json();
                     rewardAmount = bidData.price || 200; // 실제 입찰가 사용
+                    bidLandingUrl = bidData.landing_url || ''; // landing URL 저장
                     console.log(`✅ [TRACK-CLICK] Bidded ad reward from DB: ${rewardAmount}원 (bid: ${bidData.buyer_name})`);
+                    console.log(`✅ [TRACK-CLICK] Bid landing URL: ${bidLandingUrl}`);
                 } else {
                     console.warn(`⚠️ Failed to get bid info (status: ${bidResponse.status}), using fallback amount`);
                     rewardAmount = 200; // Fallback 보상
@@ -223,7 +226,14 @@ export async function POST(request: NextRequest) {
                 // 구글: /search?q=검색어 형식
                 finalUrl = `https://www.google.com/search?q=${encodeURIComponent(actualQuery)}`;
             } else {
-                finalUrl = `https://advertiser.example.com/click/${bidId}`;
+                // 실제 광고주의 경우: 위에서 이미 조회한 landing_url 사용
+                if (bidLandingUrl) {
+                    finalUrl = bidLandingUrl;
+                    console.log(`✅ [TRACK-CLICK] Using real advertiser landing URL: ${finalUrl}`);
+                } else {
+                    console.warn(`⚠️ No landing URL found for bid ${bidId}, using fallback`);
+                    finalUrl = `https://advertiser.example.com/click/${bidId}`;
+                }
             }
         } else {
             // Fallback 광고의 경우 파트너 URL
@@ -241,9 +251,10 @@ export async function POST(request: NextRequest) {
                 rewardAmount,
                 adType,
                 searchId,
-                bidId
+                bidId,
+                trade_id: bidId  // SLA 검증용 trade_id 추가
             },
-            message: `보상 ${rewardAmount}원이 지급되었습니다.`
+            message: `거래가 등록되었으며, SLA 검증 대기 중입니다.`
         };
         console.log(`[SERVER LOG] 성공 응답 데이터:`, successResponse);
         console.log(`--- ✅ /api/track-click API 완료 (성공) ---`);
@@ -254,6 +265,7 @@ export async function POST(request: NextRequest) {
             adType: string;
             searchId: string;
             bidId: string;
+            trade_id: string;
         }>>(successResponse, { status: 200 });
 
     } catch (error) {

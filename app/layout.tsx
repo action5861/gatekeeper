@@ -2,6 +2,7 @@
 
 import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
+import ReturnTracker from './components/ReturnTracker'
 import './globals.css'
 import { Providers } from './providers'
 
@@ -21,6 +22,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${inter.className} bg-slate-900 text-slate-100 min-h-screen`}>
         <Providers>
+          <ReturnTracker />
           {children}
         </Providers>
       </body>

@@ -57,35 +57,8 @@ export async function GET(request: NextRequest) {
         console.log('받은 데이터 개수:', data.advertisers?.length || 0)
         console.log('첫 번째 광고주:', data.advertisers?.[0]?.company_name || '없음')
 
-        // 카테고리 path -> id 매핑 (프론트는 id 배열을 기대함)
-        try {
-            // 광고주 서비스의 카테고리로만 매핑하여 소스 불일치를 방지
-            const svcCategoriesRes = await fetch(`${advertiserServiceUrl}/business-categories`)
-            if (!svcCategoriesRes.ok) throw new Error(`category fetch ${svcCategoriesRes.status}`)
-            const allCategories = await svcCategoriesRes.json()
-            const pathToId = new Map<string, number>()
-                ; (allCategories as any[]).forEach((c) => pathToId.set(c.path, c.id))
-
-            const transformed = {
-                ...data,
-                advertisers: Array.isArray(data.advertisers)
-                    ? data.advertisers.map((adv: any) => ({
-                        ...adv,
-                        categories: Array.isArray(adv.categories)
-                            ? adv.categories
-                                .map((path: string) => pathToId.get(path))
-                                .filter((v: number | undefined): v is number => typeof v === 'number')
-                            : [],
-                    }))
-                    : [],
-            }
-
-            return NextResponse.json(transformed)
-        } catch (mapErr) {
-            console.error('카테고리 매핑 실패 (path->id):', mapErr)
-            // 매핑 실패 시 원본 반환
-            return NextResponse.json(data)
-        }
+        // 카테고리는 path 문자열 그대로 반환 (AI 분석 결과 직접 표시)
+        return NextResponse.json(data)
 
     } catch (error) {
         console.error('Error fetching advertisers:', error)
@@ -162,26 +135,14 @@ export async function PATCH(request: NextRequest) {
         await requireAdminAuth(request)
 
         const body = await request.json()
-        const { advertiser_id, keywords, categories } = body as { advertiser_id: number; keywords: string[]; categories: number[] }
-
-        // 광고주 서비스 카테고리(플랫) 조회하여 id -> path 매핑
-        const advertiserServiceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
-        const svcCategoriesRes = await fetch(`${advertiserServiceUrl}/business-categories`)
-        if (!svcCategoriesRes.ok) {
-            return NextResponse.json({ error: 'Failed to load categories for mapping' }, { status: 500 })
-        }
-        const allCategories: Array<{ id: number; path: string }> = await svcCategoriesRes.json()
-        const idToPath = new Map<number, string>()
-        allCategories.forEach((c) => idToPath.set(c.id, c.path))
-        const categoryPaths: string[] = Array.isArray(categories)
-            ? categories.map((id) => idToPath.get(id)).filter((p): p is string => typeof p === 'string')
-            : []
+        const { advertiser_id, keywords, categories } = body as { advertiser_id: number; keywords: string[]; categories: string[] }
 
         // FastAPI 엔드포인트는 Query 파라미터로 수신함 (List는 키 반복)
+        const advertiserServiceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://localhost:8007'
         const qs = new URLSearchParams()
         qs.set('advertiser_id', String(advertiser_id))
             ; (keywords || []).forEach((k) => qs.append('keywords', String(k)))
-        categoryPaths.forEach((p) => qs.append('categories', p))
+            ; (categories || []).forEach((c) => qs.append('categories', String(c)))
 
         // Authorization 헤더를 광고주 서비스로 전달
         const authHeader = request.headers.get('authorization')

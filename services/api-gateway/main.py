@@ -121,6 +121,7 @@ SERVICE_URLS = {
     "advertiser": os.getenv("ADVERTISER_SERVICE_URL", "http://localhost:8007"),
     "auction": os.getenv("AUCTION_SERVICE_URL", "http://localhost:8002"),
     "payment": os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8003"),
+    "settlement": os.getenv("SETTLEMENT_SERVICE_URL", "http://localhost:8008"),
     "quality": os.getenv("QUALITY_SERVICE_URL", "http://localhost:8006"),
     "analysis": os.getenv("ANALYSIS_SERVICE_URL", "http://localhost:8001"),
     "verification": os.getenv("VERIFICATION_SERVICE_URL", "http://localhost:8004"),
@@ -286,9 +287,43 @@ async def proxy_request(
 @app.post("/api/auth/register")
 async def register_user(request: Request):
     body = await request.json()
-    return await proxy_request(
-        "user", "/register", "POST", data=body, auth_required=False, request=request
-    )
+
+    # Check if this is an advertiser registration
+    if body.get("userType") == "advertiser":
+        # Transform the data for advertiser service
+        import re
+
+        email_username = body["email"].replace("@", "_at_")
+        email_username = re.sub(r"[^a-zA-Z0-9_가-힣]", "_", email_username)
+
+        # Convert categories to numeric if they are strings
+        business_setup = body.get("businessSetup", {})
+        categories = business_setup.get("categories", [])
+        numeric_categories = [int(c) if isinstance(c, str) else c for c in categories]
+
+        transformed_body = {
+            "username": email_username,
+            "email": body["email"],
+            "password": body["password"],
+            "company_name": body["companyName"],
+            "business_setup": {
+                **business_setup,
+                "categories": numeric_categories,
+            },
+        }
+
+        return await proxy_request(
+            "advertiser",
+            "/register",
+            "POST",
+            data=transformed_body,
+            auth_required=False,
+            request=request,
+        )
+    else:
+        return await proxy_request(
+            "user", "/register", "POST", data=body, auth_required=False, request=request
+        )
 
 
 @app.post("/api/auth/login")
@@ -358,6 +393,33 @@ async def login_advertiser(request: Request):
 async def get_advertiser_dashboard(request: Request):
     return await proxy_request(
         "advertiser", "/dashboard", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/advertiser/status", dependencies=[Depends(verify_token)])
+async def get_advertiser_status(request: Request):
+    return await proxy_request(
+        "advertiser", "/status", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/advertiser/ai-suggestions", dependencies=[Depends(verify_token)])
+async def get_ai_suggestions(request: Request):
+    return await proxy_request(
+        "advertiser", "/ai-suggestions", "GET", auth_required=True, request=request
+    )
+
+
+@app.post("/api/advertiser/confirm-suggestions", dependencies=[Depends(verify_token)])
+async def confirm_suggestions(request: Request):
+    body = await request.json()
+    return await proxy_request(
+        "advertiser",
+        "/confirm-suggestions",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
     )
 
 
@@ -524,6 +586,63 @@ async def claim_reward(request: Request):
     body = await request.json()
     return await proxy_request(
         "verification", "/claim", "POST", data=body, auth_required=True, request=request
+    )
+
+
+@app.post("/api/verification/verify-delivery", dependencies=[Depends(verify_token)])
+async def verify_delivery(request: Request):
+    """SLA 검증 요청을 Verification Service로 전달"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/verify-delivery",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
+    )
+
+
+@app.post("/api/verification/update-pending-return")
+async def update_pending_return(request: Request):
+    """1차 평가: PENDING_RETURN 상태 업데이트 (내부 서비스간 통신용)"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/update-pending-return",
+        "POST",
+        data=body,
+        auth_required=False,  # 서비스간 통신
+        request=request,
+    )
+
+
+@app.post("/api/verification/verify-return", dependencies=[Depends(verify_token)])
+async def verify_return(request: Request):
+    """2차 평가: 사용자 복귀 시 체류 시간 기반 최종 평가"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/verify-return",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
+    )
+
+
+# Settlement Service
+@app.post("/api/settlement/settle-trade")
+async def settle_trade(request: Request):
+    """정산 요청을 Settlement Service로 전달 (내부 서비스간 통신용)"""
+    body = await request.json()
+    return await proxy_request(
+        "settlement",
+        "/settle-trade",
+        "POST",
+        data=body,
+        auth_required=False,  # 서비스간 통신
+        request=request,
     )
 
 

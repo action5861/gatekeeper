@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
 import { Transaction, TransactionStatus } from '@/lib/types';
-import { UploadCloud, CheckCircle, XCircle, Loader2, FileText, Clock, RefreshCw } from 'lucide-react';
+import { CheckCircle, Clock, FileText, Loader2, RefreshCw, UploadCloud, XCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
 interface Props {
   initialTransactions: Transaction[];
@@ -13,6 +13,9 @@ const statusStyles = {
   '검증 대기중': 'bg-yellow-500 text-yellow-100 animate-pulse',
   '2차 완료': 'bg-green-500 text-green-100',
   '검증 실패': 'bg-red-500 text-red-100',
+  'PENDING_VERIFICATION': 'bg-yellow-600 text-yellow-100 animate-pulse',
+  'SETTLED': 'bg-green-600 text-green-100',
+  'FAILED': 'bg-red-600 text-red-100',
 };
 
 const statusLabels = {
@@ -20,6 +23,9 @@ const statusLabels = {
   '검증 대기중': 'Verification Pending',
   '2차 완료': 'Secondary Completed',
   '검증 실패': 'Verification Failed',
+  'PENDING_VERIFICATION': 'SLA Verification Pending',
+  'SETTLED': 'Settled',
+  'FAILED': 'Failed',
 };
 
 export function TransactionHistory({ initialTransactions }: Props) {
@@ -83,9 +89,9 @@ export function TransactionHistory({ initialTransactions }: Props) {
 
       // 결과에 따라 상태 업데이트
       setTransactions(prev =>
-        prev.map(t => 
-          t.id === selectedTxnId 
-            ? { ...t, status: result.status, secondaryReward: result.secondaryReward } 
+        prev.map(t =>
+          t.id === selectedTxnId
+            ? { ...t, status: result.status, secondaryReward: result.secondaryReward }
             : t
         )
       );
@@ -155,7 +161,7 @@ export function TransactionHistory({ initialTransactions }: Props) {
           <span>Refresh</span>
         </button>
       </div>
-      
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -182,7 +188,7 @@ export function TransactionHistory({ initialTransactions }: Props) {
                   {transaction.primaryReward.toLocaleString()}원
                 </td>
                 <td className="py-3 px-3 text-blue-400 font-semibold">
-                  {transaction.secondaryReward 
+                  {transaction.secondaryReward
                     ? `${transaction.secondaryReward.toLocaleString()}원`
                     : '-'
                   }

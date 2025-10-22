@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const API_GATEWAY_URL = process.env.API_GATEWAY_URL || 'http://localhost:8000';
+const SECRET_KEY = new TextEncoder().encode(
+    process.env.JWT_SECRET_KEY || process.env.SECRET_KEY || 'your-super-secret-jwt-key-change-in-production-must-be-32-chars-minimum'
+);
 
 export async function POST(request: NextRequest) {
     try {
@@ -46,11 +49,13 @@ export async function POST(request: NextRequest) {
 
         console.log(`Login successful for ${userType} via API Gateway`)
 
-        // Add userType to the response for frontend routing
+        // 백엔드에서 받은 토큰을 그대로 사용
+        // 광고주의 경우 백엔드 서비스가 이미 advertiser_id를 토큰에 포함하고 있음
         return NextResponse.json({
-            ...data,
+            access_token: data.access_token,
+            token_type: 'bearer',
             userType: userType
-        })
+        });
     } catch (error) {
         console.error('Login API error:', error)
         return NextResponse.json(

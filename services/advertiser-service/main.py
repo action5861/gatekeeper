@@ -98,7 +98,7 @@ async def startup():
                 """
                 INSERT INTO business_categories (name, path, level, sort_order)
                 VALUES (:name, :path, :level, :sort_order)
-                ON CONFLICT (name) DO NOTHING
+                ON CONFLICT DO NOTHING
                 """,
                 category,
             )
@@ -137,6 +137,11 @@ ALGORITHM = os.getenv("JWT_ALG", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 JWT_ISSUER = os.getenv("JWT_ISSUER")
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE")
+
+# Website Analysis Service URL
+WEBSITE_ANALYSIS_SERVICE_URL = os.getenv(
+    "WEBSITE_ANALYSIS_SERVICE_URL", "http://website-analysis-service:8009"
+)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=True)
@@ -333,11 +338,12 @@ class BidRange(BaseModel):
 
 
 class BusinessSetupData(BaseModel):
+    # AI 온보딩: websiteUrl만 필수, 나머지는 선택적 (AI가 자동 생성하거나 기본값 사용)
     websiteUrl: str = Field(..., max_length=500)
-    keywords: List[str] = Field(..., description="키워드 목록")
-    categories: List[int] = Field(..., description="카테고리 ID 목록")
-    dailyBudget: int = Field(..., ge=1000, le=10000000)
-    bidRange: BidRange
+    keywords: Optional[List[str]] = Field(None, description="키워드 목록")
+    categories: Optional[List[int]] = Field(None, description="카테고리 ID 목록")
+    dailyBudget: Optional[int] = Field(None, ge=1000, le=10000000)
+    bidRange: Optional[BidRange] = None
 
     @validator("websiteUrl")
     def validate_website_url(cls, v):
@@ -348,6 +354,8 @@ class BusinessSetupData(BaseModel):
 
     @validator("keywords")
     def validate_keywords(cls, v):
+        if v is None:
+            return v
         if len(v) > 100:
             raise ValueError("키워드는 최대 100개까지 입력 가능합니다")
         for k in v:
@@ -358,6 +366,8 @@ class BusinessSetupData(BaseModel):
 
     @validator("categories")
     def validate_categories(cls, v):
+        if v is None:
+            return v
         if len(v) > 50:
             raise ValueError("카테고리는 최대 50개까지 선택 가능합니다")
         for cid in v:
@@ -462,14 +472,14 @@ async def register_advertiser(advertiser: AdvertiserRegister):
         )
         daily_budget = (
             advertiser.business_setup.dailyBudget
-            if advertiser.business_setup
+            if advertiser.business_setup and advertiser.business_setup.dailyBudget
             else 10000.0
         )
 
         new_id_row = await database.fetch_one(
             """
-            INSERT INTO advertisers (username, email, hashed_password, company_name, website_url, daily_budget)
-            VALUES (:username, :email, :hashed_password, :company_name, :website_url, :daily_budget)
+            INSERT INTO advertisers (username, email, hashed_password, company_name, website_url, daily_budget, approval_status)
+            VALUES (:username, :email, :hashed_password, :company_name, :website_url, :daily_budget, :approval_status)
             RETURNING id
             """,
             {
@@ -479,6 +489,7 @@ async def register_advertiser(advertiser: AdvertiserRegister):
                 "company_name": advertiser.company_name,
                 "website_url": website_url,
                 "daily_budget": daily_budget,
+                "approval_status": "pending_analysis" if website_url else "pending",
             },
         )
         if not new_id_row:
@@ -488,14 +499,26 @@ async def register_advertiser(advertiser: AdvertiserRegister):
         if advertiser.business_setup:
             await save_business_setup_data(advertiser_id, advertiser.business_setup)
 
-        await create_review_status(advertiser_id)
+        # 심사 상태 생성 (website_url 전달)
+        await create_review_status(advertiser_id, website_url)
+
+        # 웹사이트 URL이 있으면 AI 분석 서비스 호출
+        if website_url:
+            await trigger_website_analysis(advertiser_id, website_url)
+            message = "광고주 등록이 완료되었습니다. AI가 웹사이트를 분석 중이며, 완료 후 알림을 드립니다."
+            review_status = "pending_analysis"
+        else:
+            message = "광고주 등록이 완료되었습니다. 24시간 내에 심사가 완료됩니다."
+            review_status = "pending"
 
         return {
             "success": True,
-            "message": "광고주 등록이 완료되었습니다. 24시간 내에 심사가 완료됩니다.",
+            "message": message,
             "username": advertiser.username,
-            "review_status": "pending",
-            "review_message": "24시간 내 심사 완료",
+            "review_status": review_status,
+            "review_message": (
+                "AI 분석 진행 중" if website_url else "24시간 내 심사 완료"
+            ),
         }
     except HTTPException:
         raise
@@ -509,69 +532,86 @@ async def save_business_setup_data(
 ):
     """비즈니스 설정 저장"""
     try:
-        # 키워드
-        for keyword in business_setup.keywords:
-            await database.execute(
-                """
-                INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
-                VALUES (:advertiser_id, :keyword, :priority, :match_type)
-                """,
-                {
-                    "advertiser_id": advertiser_id,
-                    "keyword": keyword,
-                    "priority": 1,
-                    "match_type": "broad",
-                },
-            )
-
-        # 카테고리
-        for category_id in business_setup.categories:
-            try:
-                info = await database.fetch_one(
-                    "SELECT name, path, level FROM business_categories WHERE id = :id",
-                    {"id": category_id},
-                )
-                if info:
-                    await database.execute(
-                        """
-                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
-                        VALUES (:advertiser_id, :path, :level, :is_primary)
-                        """,
-                        {
-                            "advertiser_id": advertiser_id,
-                            "path": info["path"],
-                            "level": info["level"],
-                            "is_primary": False,
-                        },
-                    )
-                else:
-                    await database.execute(
-                        """
-                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
-                        VALUES (:advertiser_id, :path, :level, :is_primary)
-                        """,
-                        {
-                            "advertiser_id": advertiser_id,
-                            "path": f"Unknown Category {category_id}",
-                            "level": 1,
-                            "is_primary": False,
-                        },
-                    )
-            except Exception:
+        # 키워드 (사용자가 직접 입력한 키워드) - AI 온보딩 시에는 None일 수 있음
+        if business_setup.keywords:
+            for keyword in business_setup.keywords:
                 await database.execute(
                     """
-                    INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary)
-                    VALUES (:advertiser_id, :path, :level, :is_primary)
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, source)
+                    VALUES (:advertiser_id, :keyword, :priority, :match_type, :source)
                     """,
                     {
                         "advertiser_id": advertiser_id,
-                        "path": f"Category {category_id}",
-                        "level": 1,
-                        "is_primary": False,
+                        "keyword": keyword,
+                        "priority": 1,
+                        "match_type": "broad",
+                        "source": "user_added",
                     },
                 )
 
-        # 자동 입찰 초기 설정
+        # 카테고리 (사용자가 직접 선택한 카테고리) - AI 온보딩 시에는 None일 수 있음
+        if business_setup.categories:
+            for category_id in business_setup.categories:
+                try:
+                    info = await database.fetch_one(
+                        "SELECT name, path, level FROM business_categories WHERE id = :id",
+                        {"id": category_id},
+                    )
+                    if info:
+                        await database.execute(
+                            """
+                            INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
+                            VALUES (:advertiser_id, :path, :level, :is_primary, :source)
+                            """,
+                            {
+                                "advertiser_id": advertiser_id,
+                                "path": info["path"],
+                                "level": info["level"],
+                                "is_primary": False,
+                                "source": "user_added",
+                            },
+                        )
+                    else:
+                        await database.execute(
+                            """
+                            INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
+                            VALUES (:advertiser_id, :path, :level, :is_primary, :source)
+                            """,
+                            {
+                                "advertiser_id": advertiser_id,
+                                "path": f"Unknown Category {category_id}",
+                                "level": 1,
+                                "is_primary": False,
+                                "source": "user_added",
+                            },
+                        )
+                except Exception:
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
+                        VALUES (:advertiser_id, :path, :level, :is_primary, :source)
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "path": f"Category {category_id}",
+                            "level": 1,
+                            "is_primary": False,
+                            "source": "user_added",
+                        },
+                    )
+
+        # 자동 입찰 초기 설정 - AI 온보딩 시 기본값 사용
+        import json
+
+        # 기본값 설정
+        daily_budget = (
+            business_setup.dailyBudget if business_setup.dailyBudget else 10000
+        )
+        min_bid = business_setup.bidRange.min if business_setup.bidRange else 100
+        max_bid = business_setup.bidRange.max if business_setup.bidRange else 3000
+        # JSONB 타입에는 Python dict/list를 직접 전달
+        preferred_cats = business_setup.categories if business_setup.categories else []
+
         await database.execute(
             """
             INSERT INTO auto_bid_settings (
@@ -584,12 +624,14 @@ async def save_business_setup_data(
             {
                 "advertiser_id": advertiser_id,
                 "is_enabled": False,
-                "daily_budget": business_setup.dailyBudget,
-                "min_bid_per_keyword": business_setup.bidRange.min,
-                "max_bid_per_keyword": business_setup.bidRange.max,
+                "daily_budget": daily_budget,
+                "min_bid_per_keyword": min_bid,
+                "max_bid_per_keyword": max_bid,
                 "min_quality_score": 50,
-                "preferred_categories": business_setup.categories,
-                "excluded_keywords": [],
+                "preferred_categories": json.dumps(
+                    preferred_cats
+                ),  # JSONB는 JSON 문자열
+                "excluded_keywords": [],  # TEXT[] 배열은 Python 리스트
             },
         )
     except Exception as e:
@@ -597,19 +639,51 @@ async def save_business_setup_data(
         raise
 
 
-async def create_review_status(advertiser_id: int):
+async def create_review_status(advertiser_id: int, website_url: Optional[str] = None):
     """심사 상태 생성"""
     try:
+        # 웹사이트 URL이 있으면 AI 분석 대기, 없으면 일반 심사 대기
+        review_status = "pending_analysis" if website_url else "pending"
         await database.execute(
             """
             INSERT INTO advertiser_reviews (advertiser_id, review_status, recommended_bid_min, recommended_bid_max)
-            VALUES (:advertiser_id, 'pending', :min_bid, :max_bid)
+            VALUES (:advertiser_id, :review_status, :min_bid, :max_bid)
             """,
-            {"advertiser_id": advertiser_id, "min_bid": 100, "max_bid": 5000},
+            {
+                "advertiser_id": advertiser_id,
+                "review_status": review_status,
+                "min_bid": 100,
+                "max_bid": 5000,
+            },
         )
     except Exception as e:
         logger.exception("create_review_status error: %r", e)
         raise
+
+
+async def trigger_website_analysis(advertiser_id: int, website_url: str):
+    """
+    WebsiteAnalysisService에 분석 요청을 비동기로 전송합니다.
+    실패해도 회원가입은 완료되어야 하므로 에러를 로깅만 합니다.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{WEBSITE_ANALYSIS_SERVICE_URL}/analyze",
+                json={"advertiser_id": advertiser_id, "url": website_url},
+            )
+            if response.status_code == 200:
+                logger.info(
+                    f"✅ Website analysis triggered for advertiser_id={advertiser_id}"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Website analysis request failed with status {response.status_code} for advertiser_id={advertiser_id}"
+                )
+    except Exception as e:
+        logger.error(
+            f"❌ Failed to trigger website analysis for advertiser_id={advertiser_id}: {e}"
+        )
 
 
 @app.post("/login", response_model=Token)
@@ -653,6 +727,181 @@ async def login_advertiser(advertiser: AdvertiserLogin):
     except Exception as e:
         logger.exception("Login error: %r", e)
         raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+
+# ------------------------------------------------------------------------------
+# AI 온보딩 관련 API
+# ------------------------------------------------------------------------------
+@app.get("/status")
+async def get_advertiser_status(
+    current_advertiser: dict = Depends(get_current_advertiser),
+):
+    """현재 광고주의 승인 상태 및 심사 상태 조회"""
+    try:
+        advertiser_id = current_advertiser["id"]
+
+        # 광고주 기본 정보 조회
+        advertiser_info = await database.fetch_one(
+            """
+            SELECT approval_status, website_url, created_at
+            FROM advertisers 
+            WHERE id = :id
+            """,
+            {"id": advertiser_id},
+        )
+
+        if not advertiser_info:
+            raise HTTPException(status_code=404, detail="Advertiser not found")
+
+        # 심사 정보 조회
+        review_info = await database.fetch_one(
+            """
+            SELECT review_status, website_analysis, updated_at
+            FROM advertiser_reviews 
+            WHERE advertiser_id = :id
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            {"id": advertiser_id},
+        )
+
+        return {
+            "approval_status": advertiser_info["approval_status"],
+            "review_status": review_info["review_status"] if review_info else None,
+            "website_analysis": (
+                review_info["website_analysis"] if review_info else None
+            ),
+            "website_url": advertiser_info["website_url"],
+            "created_at": (
+                advertiser_info["created_at"].isoformat()
+                if advertiser_info["created_at"]
+                else None
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Get status error: %r", e)
+        raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
+
+
+@app.get("/ai-suggestions")
+async def get_ai_suggestions(
+    current_advertiser: dict = Depends(get_current_advertiser),
+):
+    """AI가 제안한 키워드와 카테고리 조회"""
+    try:
+        advertiser_id = current_advertiser["id"]
+
+        # AI가 제안한 키워드 조회
+        keywords = await database.fetch_all(
+            """
+            SELECT id, keyword, priority, match_type
+            FROM advertiser_keywords 
+            WHERE advertiser_id = :id AND source = 'ai_suggested'
+            ORDER BY id
+            """,
+            {"id": advertiser_id},
+        )
+
+        # AI가 제안한 카테고리 조회
+        categories = await database.fetch_all(
+            """
+            SELECT id, category_path, category_level, is_primary
+            FROM advertiser_categories 
+            WHERE advertiser_id = :id AND source = 'ai_suggested'
+            ORDER BY id
+            """,
+            {"id": advertiser_id},
+        )
+
+        return {
+            "keywords": [
+                {
+                    "id": row["id"],
+                    "keyword": row["keyword"],
+                    "priority": row["priority"],
+                    "match_type": row["match_type"],
+                }
+                for row in keywords
+            ],
+            "categories": [
+                {
+                    "id": row["id"],
+                    "category_path": row["category_path"],
+                    "category_level": row["category_level"],
+                    "is_primary": row["is_primary"],
+                }
+                for row in categories
+            ],
+        }
+    except Exception as e:
+        logger.exception("Get AI suggestions error: %r", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get AI suggestions: {str(e)}"
+        )
+
+
+@app.post("/confirm-suggestions")
+async def confirm_suggestions(
+    payload: dict, current_advertiser: dict = Depends(get_current_advertiser)
+):
+    """사용자가 수정한 AI 제안을 확정"""
+    try:
+        advertiser_id = current_advertiser["id"]
+        keywords = payload.get("keywords", [])
+        categories = payload.get("categories", [])
+
+        # 기존 AI 제안 삭제
+        await database.execute(
+            "DELETE FROM advertiser_keywords WHERE advertiser_id = :id AND source = 'ai_suggested'",
+            {"id": advertiser_id},
+        )
+        await database.execute(
+            "DELETE FROM advertiser_categories WHERE advertiser_id = :id AND source = 'ai_suggested'",
+            {"id": advertiser_id},
+        )
+
+        # 수정된 키워드 저장 (source를 'user_confirmed'로 변경)
+        for kw in keywords:
+            await database.execute(
+                """
+                INSERT INTO advertiser_keywords (advertiser_id, keyword, source, match_type, priority)
+                VALUES (:advertiser_id, :keyword, 'user_confirmed', :match_type, :priority)
+                """,
+                {
+                    "advertiser_id": advertiser_id,
+                    "keyword": kw.get("keyword"),
+                    "match_type": kw.get("match_type", "broad"),
+                    "priority": kw.get("priority", 1),
+                },
+            )
+
+        # 수정된 카테고리 저장 (source를 'user_confirmed'로 변경)
+        for cat in categories:
+            await database.execute(
+                """
+                INSERT INTO advertiser_categories (advertiser_id, category_path, source, category_level, is_primary)
+                VALUES (:advertiser_id, :category_path, 'user_confirmed', :category_level, :is_primary)
+                """,
+                {
+                    "advertiser_id": advertiser_id,
+                    "category_path": cat.get("category_path"),
+                    "category_level": cat.get("category_level", 1),
+                    "is_primary": cat.get("is_primary", False),
+                },
+            )
+
+        return {
+            "success": True,
+            "message": "설정이 확정되었습니다.",
+            "keywords_count": len(keywords),
+            "categories_count": len(categories),
+        }
+    except Exception as e:
+        logger.exception("Confirm suggestions error: %r", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to confirm suggestions: {str(e)}"
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -865,6 +1114,7 @@ async def update_review_status(
     admin_user: dict = Depends(get_current_admin),
 ):
     try:
+        # 1. 심사 상태 업데이트
         await database.execute(
             """
             UPDATE advertiser_reviews 
@@ -883,6 +1133,20 @@ async def update_review_status(
                 "id": advertiser_id,
             },
         )
+
+        # 2. 승인 시 자동 입찰 활성화
+        if review_status == "approved":
+            await database.execute(
+                """
+                UPDATE auto_bid_settings 
+                SET is_enabled = true,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE advertiser_id = :id
+                """,
+                {"id": advertiser_id},
+            )
+            logger.info(f"광고주 {advertiser_id} 심사 승인으로 자동 입찰 활성화")
+
         return {"success": True, "message": "심사 상태가 업데이트되었습니다."}
     except HTTPException:
         raise

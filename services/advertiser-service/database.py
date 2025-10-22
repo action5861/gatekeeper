@@ -159,6 +159,7 @@ class AutoBidSetting(Base):
     is_enabled = Column(Boolean, default=False)
     daily_budget = Column(DECIMAL(10, 2), default=10000.00)
     max_bid_per_keyword = Column(Integer, default=3000)
+    min_bid_per_keyword = Column(Integer, default=100)  # Added missing column
     min_quality_score = Column(Integer, default=50)
     preferred_categories = Column(JSON, nullable=True)
     excluded_keywords = Column(JSON, nullable=True)  # TEXT[] 대신 JSON으로 저장

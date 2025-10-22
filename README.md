@@ -1,909 +1,1347 @@
+# Intendex - Real-time Intent Exchange Platform
 
-## 🏗️ 아키텍처
+검색 의도를 실시간으로 거래하는 세계 최초의 인텐트 거래소
 
-이 프로젝트는 **마이크로서비스 아키텍처(MSA)**로 설계되었습니다.
+> "List what you're searching for. Advertisers bid in real-time. Get settled when SLA is verified—or they get refunded."
 
-### 서비스 구성
+---
 
-| 서비스 | 포트 | 역할 | 기술 스택 |
-|--------|------|------|-----------|
-| **Frontend** | 3000 | Next.js 프론트엔드 | Next.js 14, TypeScript, React 18 |
-| **API Gateway** | 8000 | 서비스 간 통신 관리 | FastAPI, Python |
-| **Analysis Service** | 8001 | 데이터 가치 평가 및 품질 분석 | FastAPI, Python |
-| **Auction Service** | 8002 | 역경매 생성 및 입찰 처리 | FastAPI, Python |
-| **Payment Service** | 8003 | 보상 지급 및 거래 내역 | FastAPI, Python |
-| **Verification Service** | 8004 | 2차 보상 검증 | FastAPI, Python |
-| **User Service** | 8005 | 사용자 데이터 관리 | FastAPI, Python |
-| **Quality Service** | 8006 | 동적 제출 한도 관리 | FastAPI, Python |
-| **Advertiser Service** | 8007 | 광고주 관리 및 자동입찰 | FastAPI, Python |
-| **Database** | 5433 | PostgreSQL 데이터베이스 | PostgreSQL 15 |
+## 목차
 
-### API Gateway 및 라우팅
+1. [시스템 아키텍처](#-시스템-아키텍처)
+2. [핵심 비즈니스 플로우](#-핵심-비즈니스-플로우)
+3. [AI 분석 시스템](#-ai-분석-시스템-gemini)
+4. [2단계 하이브리드 SLA 시스템](#-2단계-하이브리드-sla-시스템-핵심)
+5. [빠른 시작](#-빠른-시작)
+6. [API 엔드포인트](#-api-엔드포인트)
+7. [테스트 가이드](#-테스트-가이드)
+8. [문제 해결](#-문제-해결)
+9. [개발 히스토리](#-개발-히스토리)
 
-#### Next.js API Routes (프론트엔드 프록시)
-- `/api/search` → Analysis Service + Auction Service
-- `/api/auction/*` → Auction Service
-- `/api/auth/*` → User Service (인증)
-- `/api/user/*` → User Service (사용자 데이터)
-- `/api/advertiser/*` → Advertiser Service
-- `/api/admin/*` → Advertiser Service (관리자 기능)
-- `/api/track-click` → 클릭 추적 및 보상 지급
-- `/api/evaluate-quality` → 품질 평가
-- `/api/verify` → Verification Service
+---
 
-#### Python API Gateway (포트 8000)
-- 모든 마이크로서비스 간 통신을 중앙에서 관리
-- JWT 토큰 검증 및 라우팅
-- 로드 밸런싱 및 에러 처리
+## 🏗️ 시스템 아키텍처
+
+### 마이크로서비스 구성
+
+| 서비스 | 포트 | 역할 | 상태 |
+|--------|------|------|------|
+| **Frontend** | 3000 | Next.js 프론트엔드 | ✅ |
+| **API Gateway** | 8000 | 서비스 간 통신 관리 | ✅ |
+| **Analysis Service** | 8001 | 검색어 AI 품질 평가 (Gemini) | ✅ |
+| **Auction Service** | 8002 | 역경매 및 입찰 처리 | ✅ |
+| **Payment Service** | 8003 | 레거시 보상 시스템 | ⚠️ Deprecated |
+| **Verification Service** | 8004 | 2단계 SLA 검증 | ✅ |
+| **User Service** | 8005 | 사용자 및 거래 등록 | ✅ |
+| **Quality Service** | 8006 | 동적 제출 한도 | ✅ |
+| **Advertiser Service** | 8007 | 광고주 및 자동입찰 | ✅ |
+| **Settlement Service** | 8008 | SLA 기반 정산 | ✅ |
+| **Website Analysis Service** | 8009 | 광고주 웹사이트 AI 분석 (Gemini) | ✅ |
+| **PostgreSQL** | 5433 | 데이터베이스 | ✅ |
+
+### 기술 스택
+
+**Frontend**
+- Next.js 15.4.2 (App Router), TypeScript, React 19
+- Tailwind CSS 4, TanStack Query
+- Lucide React, Recharts
+
+**Backend**
+- FastAPI (Python 3.11), PostgreSQL 15
+- **Google Gemini (models/gemini-flash-latest)** ⭐
+- AsyncPG, Pydantic, Uvicorn
+
+**AI/ML**
+- **Google Gemini API** - 검색어 상업적 가치 분석
+- **Google Gemini API** - 광고주 웹사이트 자동 분석
+- Playwright - 웹 스크래핑
+
+**Infrastructure**
+- Docker, Docker Compose, Terraform (AWS)
+
+---
+
+## 🔄 핵심 비즈니스 플로우
+
+### 1. 검색어 품질 평가 (AI 기반)
+
+```
+사용자 입력 (예: "나이키 에어맥스 270 블랙 구매")
+  ↓
+🤖 AI 분석 중 로딩 UI 표시
+  "AI가 검색어 가치를 분석하고 있습니다..."
+  "상업적 의도, 구체성, 구매 단계를 평가 중입니다"
+  ↓
+Analysis Service (Gemini API)
+  - 소요 시간: 약 5~10초
+  - 타임아웃: 10초 (실패 시 Legacy 사용)
+  ↓
+AI 분석 결과
+  - 종합 점수: 0-100점
+  - 상업적 의도: 0.0~1.0
+  - 구체성 수준: 0.0~1.0
+  - 카테고리: Shopping/Health/Finance 등
+  - 구매 단계: Awareness/Consideration/Decision
+  - 주된 감정: Curiosity/Urgency/Neutral 등
+  - 예측 키워드: 4~5개
+  ↓
+실시간 표시 (디바운싱 1초)
+```
+
+**예시 결과**:
+```json
+{
+  "score": 95,
+  "commercial_intent": 1.00,
+  "specificity_level": 0.95,
+  "value_category": "Shopping",
+  "buyer_journey_stage": "Decision",
+  "primary_emotion": "Urgency",
+  "predicted_keywords": [
+    "나이키 에어맥스 270 최저가",
+    "에어맥스 270 블랙 가격",
+    "나이키 운동화 구매처"
+  ]
+}
+```
+
+### 2. 역경매 및 광고 매칭
+
+```
+검색어 제출
+  ↓
+Auction Service
+  ├─ 실제 광고주 키워드 매칭
+  ├─ 자동입찰 실행 (ML 기반)
+  └─ 플랫폼 폴백 (구글, 네이버, 쿠팡)
+  ↓
+광고 목록 표시 (입찰가순)
+```
+
+### 3. 2단계 SLA 평가 및 정산 ⭐
+
+#### 1차 평가 (광고 클릭 시)
+```
+광고 클릭
+  ↓
+v_atf, clicked 측정 (3초 내)
+  ↓
+부정 클릭 검증
+  ├─ clicked = false → FAILED
+  ├─ v_atf < 0.3 → FAILED (봇)
+  └─ 정상 → PENDING_RETURN
+  ↓
+localStorage 저장 {trade_id, click_time}
+  ↓
+즉시 광고주 사이트로 리다이렉트
+```
+
+#### 2차 평가 (사용자 복귀 시)
+```
+광고주 사이트 탐색
+  ↓
+정산 확인 위해 복귀
+  ↓
+visibilitychange 감지
+  ↓
+체류 시간 = 복귀 시각 - 클릭 시각
+  ↓
+최종 판정
+  ├─ >= 10초 → PASSED (전액 200원)
+  ├─ >= 5초 → PARTIAL (부분 150원)
+  └─ < 5초 → PARTIAL (부분 100원)
+  ↓
+Settlement Service → 잔고 업데이트
+```
+
+---
+
+## 🤖 AI 분석 시스템 (Gemini)
+
+### 1. Analysis Service (검색어 분석)
+
+**목적**: 사용자 검색어의 상업적 가치를 AI로 정확하게 평가
+
+**기술 스택**:
+- Google Gemini API (`models/gemini-flash-latest`)
+- 하이브리드 분석 (AI 70% + Legacy 30%)
+- 타임아웃: 10초
+
+**분석 지표**:
+| 지표 | 설명 | 범위 |
+|------|------|------|
+| `commercial_intent` | 상업적 의도 | 0.0~1.0 |
+| `specificity_level` | 검색어 구체성 | 0.0~1.0 |
+| `value_category` | 카테고리 | Shopping, Travel, Finance 등 |
+| `buyer_journey_stage` | 구매 단계 | Awareness, Consideration, Decision |
+| `primary_emotion` | 주된 감정 | Curiosity, Urgency, Doubt 등 |
+| `predicted_keywords` | 예측 키워드 | 4~5개 |
+
+**예시**:
+```python
+# 입력: "맥북 프로 M3 최저가 비교"
+{
+  "commercial_intent": 0.98,      # 매우 높은 구매 의도
+  "specificity_level": 0.92,      # 구체적인 제품명
+  "value_category": "Shopping",
+  "buyer_journey_stage": "Decision",  # 구매 직전 단계
+  "primary_emotion": "Urgency",
+  "predicted_keywords": [
+    "맥북 프로 M3 가격",
+    "M3 최저가 할인",
+    "맥북 M3 14인치 특가"
+  ]
+}
+# 최종 점수: 96/100
+```
+
+**성능**:
+- 평균 응답 시간: **4.5~5초**
+- 타임아웃 설정: **10초**
+- 실패 시: Legacy 분석으로 자동 폴백 (0.1초)
+
+**로딩 UI**:
+```tsx
+// 사용자에게 명확한 피드백 제공
+🤖 AI가 검색어 가치를 분석하고 있습니다...
+상업적 의도, 구체성, 구매 단계를 평가 중입니다 (약 5~10초 소요)
+● ● ● (애니메이션)
+```
+
+### 2. Website Analysis Service (광고주 웹사이트 분석) ⭐
+
+**목적**: 광고주 가입 시 웹사이트를 자동으로 분석하여 키워드/카테고리 추천
+
+#### 🎯 핵심 기능
+
+**자동 온보딩 시스템**:
+```
+광고주 회원가입
+  ↓
+웹사이트 URL + 비즈니스 정보 입력
+  ↓
+백그라운드에서 AI 분석 시작
+  ↓
+광고주는 대시보드에서 상태 확인
+  ↓
+분석 완료 후 제안 검토 페이지로 이동
+  ↓
+AI 제안 승인 또는 수정
+  ↓
+관리자 최종 심사 대기
+```
+
+#### 🔧 기술 스택
+
+- **Google Gemini API** (`models/gemini-flash-latest`)
+- **Playwright** - JavaScript 렌더링 + 동적 콘텐츠 스크래핑
+- **BeautifulSoup4** - HTML 파싱 및 텍스트 추출
+- **FastAPI** - 비동기 처리 (BackgroundTasks)
+
+#### 📊 분석 프로세스 상세
+
+```
+1. 광고주 웹사이트 URL 입력
+   예: https://www.nike.com/kr/
+   
+2. 상태 변경: approval_status = 'pending_analysis'
+
+3. Playwright로 페이지 렌더링
+   - 브라우저: Chromium (Headless)
+   - 대기: networkidle (모든 리소스 로드 완료)
+   - 타임아웃: 60초
+   
+4. BeautifulSoup으로 텍스트 추출
+   - 불필요한 태그 제거 (script, style, nav, footer)
+   - 텍스트만 추출
+   - 최대 15,000자로 제한
+   
+5. Gemini AI 프롬프트
+   """
+   당신은 최고의 디지털 마케팅 전략가입니다.
+   아래 웹사이트 텍스트를 분석하여:
+   - business_summary: 100자 이내 비즈니스 요약
+   - recommended_keywords: 최대 20개의 핵심 키워드
+   - recommended_categories: 최대 5개의 카테고리
+   
+   JSON 형식으로만 반환하세요.
+   """
+   
+6. Gemini 응답 파싱 및 검증
+   - JSON 추출 (코드블록 제거)
+   - 개수 제한 적용 (키워드 20개, 카테고리 5개)
+   
+7. 데이터베이스 저장
+   ├─ advertiser_reviews: website_analysis 업데이트
+   ├─ advertiser_keywords: 20개 삽입 (source='ai_suggested')
+   └─ advertiser_categories: 5개 삽입 (source='ai_suggested')
+   
+8. 상태 변경: approval_status = 'pending'
+```
+
+#### 📈 실제 테스트 결과 (Nike 웹사이트)
+
+**입력**:
+```json
+{
+  "advertiser_id": 1,
+  "url": "https://www.nike.com/kr/"
+}
+```
+
+**AI 분석 결과**:
+```json
+{
+  "business_summary": "글로벌 스포츠 브랜드 나이키의 공식 온라인 스토어",
+  "recommended_keywords": [
+    "나이키", "Nike", "러닝화", "운동화", "스포츠 의류",
+    "축구화", "농구화", "페가수스", "보메로", "에어 포스 1",
+    "에어 조던", "나이키 에어", "트레이닝복", "축구복",
+    "러닝 재킷", "스포츠 신발", "나이키 공식", "한정판",
+    "스니커즈", "퍼포먼스"
+  ],
+  "recommended_categories": [
+    "스포츠 용품 쇼핑몰",
+    "러닝 및 퍼포먼스 의류",
+    "운동화/스니커즈",
+    "피트니스 및 웰니스",
+    "글로벌 스포츠 브랜드"
+  ]
+}
+```
+
+**데이터베이스 저장 결과**:
+```sql
+-- advertiser_keywords 테이블
+SELECT keyword FROM advertiser_keywords 
+WHERE advertiser_id = 1 AND source = 'ai_suggested';
+-- 결과: 20개 키워드 저장 완료 ✅
+
+-- advertiser_categories 테이블
+SELECT category_path FROM advertiser_categories 
+WHERE advertiser_id = 1 AND source = 'ai_suggested';
+-- 결과: 5개 카테고리 저장 완료 ✅
+```
+
+#### ⚡ 성능 지표
+
+| 단계 | 소요 시간 |
+|------|----------|
+| 웹 스크래핑 (Playwright) | 2~3초 |
+| AI 분석 (Gemini) | 5~10초 |
+| 데이터베이스 저장 | 0.5초 |
+| **총 소요 시간** | **7~13초** |
+
+**안정성**:
+- ✅ 타임아웃 설정: 10초 (Gemini)
+- ✅ 에러 처리: 실패 시 상태 복원
+- ✅ 백그라운드 처리: 사용자 대기 불필요
+
+#### 🌐 API 엔드포인트
+
+**1. 분석 시작**
+```python
+POST http://localhost:8009/analyze
+Content-Type: application/json
+
+{
+  "advertiser_id": 1,
+  "url": "https://www.nike.com/kr/"
+}
+
+# 응답 (즉시)
+{
+  "message": "Analysis started in the background.",
+  "advertiser_id": 1,
+  "url": "https://www.nike.com/kr/"
+}
+```
+
+**2. 상태 조회**
+```python
+GET http://localhost:8009/status/1
+
+# 응답
+{
+  "advertiser_id": 1,
+  "approval_status": "pending",           # pending_analysis → pending
+  "review_status": "pending",
+  "website_analysis": "글로벌 스포츠 브랜드...",
+  "ai_suggested_keywords": 20,
+  "ai_suggested_categories": 5
+}
+```
+
+**3. 헬스 체크**
+```python
+GET http://localhost:8009/health
+
+# 응답
+{
+  "status": "ok",
+  "service": "website-analysis-service"
+}
+```
+
+#### 🎨 프론트엔드 통합
+
+**광고주 대시보드**:
+```tsx
+// 분석 상태 배너 표시
+<AnalysisStatusBanner 
+  status="pending_analysis"  // AI 분석 중
+/>
+
+// 완료 후 제안 검토 버튼
+<Button onClick={() => router.push('/advertiser/review-suggestions')}>
+  AI 제안 검토하기
+</Button>
+```
+
+**제안 검토 페이지** (`/advertiser/review-suggestions`):
+```tsx
+// AI 추천 키워드 표시 (20개)
+<KeywordList keywords={aiSuggestedKeywords} source="ai" />
+
+// AI 추천 카테고리 표시 (5개)
+<CategoryList categories={aiSuggestedCategories} source="ai" />
+
+// 승인 버튼
+<Button onClick={handleConfirm}>
+  AI 제안 승인 및 심사 요청
+</Button>
+```
+
+#### 🔒 보안 및 검증
+
+**입력 검증**:
+- URL 형식 검증
+- advertiser_id 존재 여부 확인
+
+**안전 설정** (Gemini):
+```python
+safety_settings = [
+  {"category": HarmCategory.HARM_CATEGORY_HARASSMENT, 
+   "threshold": HarmBlockThreshold.BLOCK_NONE},
+  {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH, 
+   "threshold": HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE},
+]
+```
+
+**에러 처리**:
+```python
+try:
+    scraped_text = await scrape_website_text(url)
+    if not scraped_text:
+        # 스크래핑 실패 → 상태 복원
+        await database.execute(
+            "UPDATE advertisers SET approval_status = 'pending'"
+        )
+except Exception as e:
+    logger.error(f"분석 중 예외 발생: {e}")
+    # 에러 메시지 저장
+    await database.execute(
+        "UPDATE advertiser_reviews SET website_analysis = :error"
+    )
+```
+
+#### 📊 데이터베이스 스키마
+
+**advertiser_keywords** (AI 추천 키워드)
+```sql
+CREATE TABLE advertiser_keywords (
+    id SERIAL PRIMARY KEY,
+    advertiser_id INT REFERENCES advertisers(id),
+    keyword VARCHAR(100),
+    source VARCHAR(20),              -- 'ai_suggested' / 'manual'
+    match_type VARCHAR(20),          -- 'broad' / 'exact'
+    priority INT DEFAULT 1,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 인덱스
+CREATE INDEX idx_advertiser_keywords_source 
+ON advertiser_keywords(advertiser_id, source);
+```
+
+**advertiser_categories** (AI 추천 카테고리)
+```sql
+CREATE TABLE advertiser_categories (
+    id SERIAL PRIMARY KEY,
+    advertiser_id INT REFERENCES advertisers(id),
+    category_path VARCHAR(200),
+    source VARCHAR(20),              -- 'ai_suggested' / 'manual'
+    category_level INT DEFAULT 1,
+    is_primary BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**advertiser_reviews** (AI 분석 결과)
+```sql
+CREATE TABLE advertiser_reviews (
+    id SERIAL PRIMARY KEY,
+    advertiser_id INT REFERENCES advertisers(id),
+    website_analysis TEXT,           -- AI 비즈니스 요약
+    review_status VARCHAR(20) DEFAULT 'pending',
+    admin_notes TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+#### 🔄 전체 플로우
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 1. 광고주 회원가입                                        │
+│    - 이메일, 비밀번호, 회사명, 웹사이트 URL               │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 2. Website Analysis Service (자동 실행)                  │
+│    - 상태: pending_analysis                              │
+│    - 백그라운드: Playwright + Gemini AI                  │
+│    - 소요 시간: 7~13초                                    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 3. AI 분석 완료                                          │
+│    - 키워드 20개 저장 (advertiser_keywords)              │
+│    - 카테고리 5개 저장 (advertiser_categories)           │
+│    - 비즈니스 요약 저장 (advertiser_reviews)             │
+│    - 상태: pending                                       │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 4. 광고주 제안 검토 (/advertiser/review-suggestions)     │
+│    - AI 추천 키워드 20개 표시                             │
+│    - AI 추천 카테고리 5개 표시                            │
+│    - 수정 가능                                           │
+│    - 승인 버튼 클릭                                       │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 5. 관리자 심사 (/admin/advertiser-review)                │
+│    - AI 분석 결과 검토                                    │
+│    - 키워드/카테고리 최종 승인                            │
+│    - 상태: approved / rejected                           │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 6. 자동입찰 시작 가능                                     │
+│    - 승인된 키워드로 입찰 시작                             │
+│    - Auction Service에서 매칭                            │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 🎯 실제 사용 시나리오
+
+**시나리오 1: 성공적인 온보딩**
+```
+1. 광고주: "나이키" 회사로 가입
+2. URL: https://www.nike.com/kr/ 입력
+3. AI 분석 (10초 대기)
+4. 결과: 키워드 20개 + 카테고리 5개 생성
+5. 광고주: AI 제안 검토 후 승인
+6. 관리자: 최종 승인
+7. ✅ 입찰 시작!
+```
+
+**시나리오 2: 스크래핑 실패**
+```
+1. 광고주: URL 입력 (잘못된 URL)
+2. Playwright 접근 실패
+3. 에러: "웹사이트 분석 실패: 사이트 접근 불가"
+4. ⚠️ 관리자가 수동으로 키워드 입력 필요
+```
+
+**시나리오 3: AI 타임아웃**
+```
+1. 광고주: 복잡한 웹사이트 URL 입력
+2. Gemini API 10초 초과
+3. 에러: "웹사이트 분석 실패: AI 분석 오류"
+4. ⚠️ 재시도 또는 수동 입력
+```
+
+#### 📝 로그 예시
+
+**성공적인 분석**:
+```
+2025-10-19 10:22:45 - INFO - 🔍 [1] 웹사이트 분석 시작: https://www.nike.com/kr/
+2025-10-19 10:22:55 - INFO - ✨ [1] 전체 분석 프로세스 완료
+```
+
+**실패 케이스**:
+```
+2025-10-19 10:22:45 - INFO - 🔍 [1] 웹사이트 분석 시작: https://invalid.com
+2025-10-19 10:22:50 - ERROR - ❌ Error calling/parsing Gemini API: ...
+2025-10-19 10:22:50 - ERROR - 💥 [1] 분석 중 예외 발생: ...
+```
+
+### AI 시스템 최적화
+
+**문제 해결 과정** (2025-10-19):
+
+1. **모델 이름 오류**
+   - 문제: `gemini-1.5-pro`, `gemini-pro` → 404 에러
+   - 원인: Google이 모델 네이밍 규칙 변경
+   - 해결: `models/gemini-flash-latest` 사용
+
+2. **타임아웃 최적화**
+   - 초기: 4초 (너무 짧음 → AI 항상 실패)
+   - 시도1: 2초 (여전히 짧음)
+   - 최종: 10초 + 로딩 UI (품질 우선, UX 확보)
+
+3. **사용자 경험 개선**
+   - 문제: 사용자가 기다리는 동안 불안함
+   - 해결: 명확한 로딩 메시지 + 예상 시간 표시
+   - 결과: 사용자가 안심하고 기다릴 수 있음
+
+---
+
+## 🎯 2단계 하이브리드 SLA 시스템 (핵심)
+
+### 왜 2단계 평가가 필요한가?
+
+**문제점**: 광고주 사이트는 다른 도메인이라 체류 시간 직접 측정 불가 (Cross-Origin)
+
+**해결책**: 사용자가 정산 확인을 위해 반드시 복귀한다는 점을 활용
+
+### 구현 상세
+
+#### 프론트엔드
+
+**useSlaTracker.ts** - 단순화된 SLA 추적
+```typescript
+interface SlaMetrics {
+  v_atf: number;           // 화면 표시 여부 (부정 방지)
+  clicked: boolean;        // 클릭 여부 (핵심)
+  t_dwell_on_ad_site: 0;   // 복귀 시 측정 (1차에서는 0)
+}
+
+// 무한 루프 수정: onComplete를 ref로 관리
+const onCompleteRef = useRef(onComplete);
+useEffect(() => {
+  // SLA 추적
+}, [tradeId]); // onComplete 제거!
+```
+
+**ReturnTracker.tsx** - 복귀 감지 컴포넌트
+```typescript
+useEffect(() => {
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+      const data = localStorage.getItem('ad_return_tracker');
+      if (data) {
+        const {trade_id, click_time} = JSON.parse(data);
+        const dwell_time = (Date.now() - click_time) / 1000;
+        
+        // 2차 평가 API 호출
+        await fetch('/api/verify-return', {
+          method: 'POST',
+          body: JSON.stringify({trade_id, dwell_time})
+        });
+        
+        localStorage.removeItem('ad_return_tracker');
+      }
+    }
+  });
+}, []);
+```
+
+#### 백엔드
+
+**Verification Service** - 2개의 평가 엔드포인트
+
+**1차 평가**: `/verify-delivery`
+```python
+# v_atf, clicked만 검증
+if not clicked:
+    decision = "FAILED"
+elif v_atf < 0.3:
+    decision = "FAILED"  # 봇
+else:
+    decision = "PENDING_RETURN"  # 복귀 대기
+```
+
+**2차 평가**: `/verify-return` ⭐ 신규
+```python
+# 체류 시간 기반 최종 판정
+if dwell_time >= 10:
+    decision = "PASSED"
+elif dwell_time >= 5:
+    decision = "PARTIAL"
+else:
+    decision = "PARTIAL"
+
+# Settlement Service 호출
+await call_settlement_service(trade_id, decision, dwell_time)
+```
+
+### 데이터베이스 스키마
+
+**delivery_metrics** 테이블
+```sql
+trade_id VARCHAR(255) PRIMARY KEY,
+v_atf FLOAT DEFAULT 0,
+clicked BOOLEAN DEFAULT FALSE,        -- ⭐ 신규
+t_dwell_on_ad_site FLOAT DEFAULT 0,   -- ⭐ 신규
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+**transactions** 테이블 상태
+```sql
+'PENDING_VERIFICATION'  -- 검증 대기
+'PENDING_RETURN'        -- 복귀 대기 ⭐ 신규
+'PASSED'                -- 전액 정산 ⭐ 신규
+'PARTIAL'               -- 부분 정산 ⭐ 신규
+'FAILED'                -- 정산 실패
+```
+
+---
 
 ## 🚀 빠른 시작
 
-### 로컬 개발 환경
+### Docker로 실행
 
-1. **저장소 클론**
-   ```bash
-   git clone https://github.com/action5861/gatekeeper.git
-   cd gatekeeper
-   ```
+```bash
+# 1. 클론
+git clone https://github.com/action5861/gatekeeper.git
+cd gatekeeper
 
-2. **Docker Compose로 모든 서비스 실행**
-   ```bash
-   docker-compose up --build
-   ```
+# 2. 환경 변수 설정
+cp env.example .env
+# .env 편집: JWT_SECRET_KEY, GEMINI_API_KEY 필수!
 
-3. **개별 서비스 실행 (선택사항)**
-   ```bash
-   # Frontend만 실행
-   npm run dev
-   
-   # 개별 마이크로서비스 실행
-   cd services/analysis-service && python main.py
-   cd services/auction-service && python main.py
-   # ... 기타 서비스들
-   ```
+# 3. Docker Compose 실행
+docker-compose up --build
 
-### 프로덕션 배포
+# 4. 데이터베이스 마이그레이션
+docker exec postgres-db psql -U admin -d search_exchange_db -c "
+  ALTER TABLE delivery_metrics 
+  ADD COLUMN IF NOT EXISTS clicked BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS t_dwell_on_ad_site FLOAT DEFAULT 0;
+"
 
-1. **Terraform으로 AWS 인프라 배포**
-   ```bash
-   cd terraform
-   cp terraform.tfvars.example terraform.tfvars
-   # terraform.tfvars 파일에서 VPC ID와 서브넷 ID 설정
-   terraform init
-   terraform plan
-   terraform apply
-   ```
+# 5. 접속
+# http://localhost:3000 (사용자)
+# http://localhost:3000/advertiser/dashboard (광고주)
+# http://localhost:3000/admin/login (관리자)
+```
 
-2. **환경 변수 설정**
-   ```bash
-   export ANALYSIS_SERVICE_URL=http://your-alb-dns:8001
-   export AUCTION_SERVICE_URL=http://your-alb-dns:8002
-   export PAYMENT_SERVICE_URL=http://your-alb-dns:8003
-   export VERIFICATION_SERVICE_URL=http://your-alb-dns:8004
-   export USER_SERVICE_URL=http://your-alb-dns:8005
-   export QUALITY_SERVICE_URL=http://your-alb-dns:8006
-   export ADVERTISER_SERVICE_URL=http://your-alb-dns:8007
-   ```
+### 필수 환경 변수
 
-## 📁 프로젝트 구조
+```bash
+# .env 파일
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production-32-chars-minimum
+GEMINI_API_KEY=your_gemini_api_key_here  # ⭐ 필수!
+DATABASE_URL=postgresql://admin:password@localhost:5433/search_exchange_db
+```
+
+**Gemini API 키 발급**:
+1. https://aistudio.google.com/app/apikey 접속
+2. "Create API Key" 클릭
+3. 생성된 키를 `.env`에 추가
+
+### 로컬 개발 (Frontend만)
+
+```bash
+npm install
+npm run dev
+# http://localhost:3000
+```
+
+---
+
+## 📡 API 엔드포인트
+
+### 사용자 API
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/api/auth/register` | POST | 회원가입 |
+| `/api/auth/login` | POST | 로그인 |
+| `/api/evaluate-quality` | POST | 품질 평가 (AI) ⭐ |
+| `/api/search` | POST | 광고 검색 |
+| `/api/track-click` | POST | 광고 클릭 (거래 등록) |
+| `/api/verify-delivery` | POST | 1차 SLA 평가 |
+| `/api/verify-return` | POST | 2차 SLA 평가 |
+| `/api/track-redirect` | GET | 리다이렉트 추적 |
+| `/api/user/dashboard` | GET | 대시보드 데이터 |
+
+### 광고주 API
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/api/advertiser/register` | POST | 광고주 가입 |
+| `/api/advertiser/login` | POST | 광고주 로그인 |
+| `/api/advertiser/dashboard` | GET | 대시보드 |
+| `/api/advertiser/auto-bidding` | GET/PUT | 자동입찰 설정 |
+| `/api/advertiser/auto-bid/optimize` | POST | 입찰 최적화 |
+| `/api/advertiser/ai-suggestions` | GET | AI 웹사이트 분석 결과 ⭐ |
+| `/api/advertiser/confirm-suggestions` | POST | AI 제안 승인 ⭐ |
+
+### 관리자 API
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/api/admin/login` | POST | 관리자 로그인 |
+| `/api/admin/advertiser-review` | GET | 심사 목록 |
+| `/api/admin/advertiser-review/[id]` | PUT | 심사 결과 |
+
+---
+
+## 🧪 테스트 가이드
+
+### AI 분석 테스트
+
+**검색어 AI 분석**:
+```bash
+# 1. 사용자로 로그인
+# 2. 메인 페이지에서 검색어 입력
+#    예: "나이키 에어맥스 270 블랙 구매"
+# 3. 로딩 UI 확인 (약 5초)
+# 4. AI 분석 결과 확인
+#    - 점수: 95/100
+#    - 상업적 의도: 1.00
+#    - 구체성: 0.95
+```
+
+**광고주 웹사이트 AI 분석**:
+```bash
+# 1. 광고주로 가입
+# 2. 웹사이트 URL 입력 (예: https://www.nike.com/kr/)
+# 3. AI 분석 대기 (약 10초)
+# 4. 추천 키워드/카테고리 확인
+# 5. 승인하여 키워드 등록
+```
+
+### E2E 테스트 시나리오
+
+**시나리오 1: PASSED (전액 정산)**
+```
+1. 검색: "남성 청바지 추천"
+2. AI 분석: 점수 75점, 상업적 의도 0.90
+3. 광고 클릭 → 광고주 사이트 이동
+4. 광고주 사이트에서 15초 탐색
+5. 우리 사이트로 복귀
+6. ✅ PASSED, 200원 전액 정산
+```
+
+**시나리오 2: PARTIAL (부분 정산)**
+```
+1. 검색: "겨울 코트"
+2. AI 분석: 점수 80점
+3. 광고 클릭 → 광고주 사이트 이동
+4. 광고주 사이트에서 7초 탐색 후 복귀
+5. ⚠️ PARTIAL, 150원 부분 정산
+```
+
+**시나리오 3: AI 타임아웃**
+```
+1. 검색: "노트북"
+2. AI 분석 시도 (10초 대기)
+3. AI 타임아웃 → Legacy 분석으로 폴백
+4. 점수 20점 (Legacy 결과)
+5. 정상 진행
+```
+
+### 자동 테스트 실행
+
+```bash
+# 전체 시스템 헬스체크
+python test_health_all.py
+
+# AI 품질 평가 테스트
+python test_services.py
+
+# 대시보드 데이터 검증
+python test_dashboard_data.py
+
+# E2E 플로우 테스트
+python test_final.py
+```
+
+### 실제 작동 로그 확인
+
+```javascript
+// 기대되는 로그 (정상 작동 시)
+🤖 AI가 검색어 가치를 분석하고 있습니다...
+✅ AI 분석 완료: 나이키 에어맥스... (고품질 결과)
+✅ [STEP 3] Click tracked: 200원 reward
+💾 Saved return tracker: {trade_id: 'xxx', click_time: 1760355528028}
+🖱️ Ad clicked!
+👁️ Above The Fold: true
+📊 SLA Metrics: {v_atf: 1, clicked: true, t_dwell_on_ad_site: 0}
+✅ 1차 평가: PENDING_RETURN
+
+// 복귀 시
+👁️ [Return Tracker] Tab became visible
+🔙 User returned! Dwell Time: 84.22s
+✅ 2nd evaluation: PASSED
+🎉 전액 정산 완료!
+```
+
+---
+
+## 🚨 문제 해결
+
+### AI 분석 문제
+
+**증상**: AI 분석이 항상 실패함
+```bash
+# Analysis Service 로그 확인
+docker logs analysis-service --tail 50
+
+# 기대되는 로그
+✓ AI 분석 완료: 나이키... (고품질 결과)
+
+# 에러 로그
+⚠ AI 타임아웃 (10초 초과) → Legacy 사용
+❌ AI 분석 실패: 404 models/gemini-1.5-pro is not found
+```
+
+**해결**:
+1. Gemini API 키 확인
+2. 모델 이름 확인 (`models/gemini-flash-latest`)
+3. 타임아웃 설정 확인 (10초)
+
+**Website Analysis Service 문제**:
+```bash
+# 로그 확인
+docker logs website-analysis-service --tail 50
+
+# Gemini 설정 확인
+[Gemini] KEY_SET=True, MODEL=models/gemini-flash-latest
+
+# 재시작
+docker-compose restart website-analysis-service
+```
+
+### SLA 검증 문제
+
+```bash
+# Verification Service 로그 확인
+docker logs verification-service --tail 50
+
+# API Gateway 라우팅 확인
+docker logs api-gateway --tail 50
+
+# 데이터 확인
+docker exec postgres-db psql -U admin -d search_exchange_db -c "
+  SELECT trade_id, clicked, t_dwell_on_ad_site, created_at 
+  FROM delivery_metrics 
+  ORDER BY created_at DESC 
+  LIMIT 5;
+"
+```
+
+### 서비스 재시작
+
+```bash
+# 특정 서비스만
+docker-compose restart analysis-service
+docker-compose restart website-analysis-service
+docker-compose restart verification-service
+
+# 전체 재빌드
+docker-compose up --build
+```
+
+---
+
+## 📊 데이터베이스 스키마
+
+### 핵심 테이블
+
+**users**
+```sql
+id SERIAL PRIMARY KEY,
+email VARCHAR(255) UNIQUE,
+username VARCHAR(50) UNIQUE,
+password_hash VARCHAR(255),
+total_earnings DECIMAL(10,2) DEFAULT 0,    -- Settlement Service가 업데이트
+quality_score INT DEFAULT 70,
+daily_limit INT DEFAULT 5
+```
+
+**search_queries** ⭐ AI 분석 데이터
+```sql
+id SERIAL PRIMARY KEY,
+user_id INT REFERENCES users(id),
+query_text VARCHAR(200),
+quality_score INT,
+commercial_value VARCHAR(20),               -- low/medium/high
+keywords TEXT,                              -- JSON 배열
+suggestions TEXT,                           -- JSON 배열
+ai_analysis_data TEXT,                      -- ⭐ AI 상세 분석 (JSON)
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+**transactions**
+```sql
+id VARCHAR(255) PRIMARY KEY,               -- trade_id
+user_id INT REFERENCES users(id),
+search_id VARCHAR(255),
+bid_id VARCHAR(255),
+primary_reward DECIMAL(10,2),
+status VARCHAR(50) DEFAULT 'PENDING_VERIFICATION',
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+**delivery_metrics**
+```sql
+trade_id VARCHAR(255) PRIMARY KEY,
+v_atf FLOAT DEFAULT 0,
+clicked BOOLEAN DEFAULT FALSE,
+t_dwell_on_ad_site FLOAT DEFAULT 0,
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+**advertiser_keywords** ⭐ AI 추천 키워드
+```sql
+id SERIAL PRIMARY KEY,
+advertiser_id INT REFERENCES advertisers(id),
+keyword VARCHAR(100),
+source VARCHAR(20),                         -- 'ai_suggested' / 'manual'
+match_type VARCHAR(20),
+priority INT DEFAULT 1
+```
+
+**advertiser_categories** ⭐ AI 추천 카테고리
+```sql
+id SERIAL PRIMARY KEY,
+advertiser_id INT REFERENCES advertisers(id),
+category_path VARCHAR(200),
+source VARCHAR(20),                         -- 'ai_suggested' / 'manual'
+category_level INT DEFAULT 1,
+is_primary BOOLEAN DEFAULT FALSE
+```
+
+**advertiser_reviews** ⭐ AI 분석 결과
+```sql
+id SERIAL PRIMARY KEY,
+advertiser_id INT REFERENCES advertisers(id),
+website_analysis TEXT,                      -- AI 비즈니스 요약
+review_status VARCHAR(20) DEFAULT 'pending',
+admin_notes TEXT,
+created_at TIMESTAMP DEFAULT NOW()
+```
+
+---
+
+## 📈 주요 성과
+
+### AI 분석 정확도
+- **검색어 분석**: 5개 테스트 중 3개 완벽 일치 (60%)
+- **웹사이트 분석**: Nike 웹사이트 20개 키워드 + 5개 카테고리 정확 생성
+- **응답 시간**: 평균 4.5~5초 (안정적)
+
+### 측정 정확도
+- **이전**: t_dwell_on_ad_site = 0 (측정 실패)
+- **현재**: 84.22초 (정확한 측정)
+
+### 사용자 경험
+- **이전**: 3초 카운트다운 대기
+- **현재**: 즉시 광고주 사이트 이동
+- **AI 분석**: 명확한 로딩 메시지로 안심 대기
+
+### 시스템 안정성
+- **이전**: 무한 루프 + Cross-origin 에러
+- **현재**: 안정적 작동
+- **AI 폴백**: 타임아웃 시 자동 Legacy 전환
+
+### 광고 품질
+- **이전**: 클릭하면 오히려 손해
+- **현재**: 체류 시간 = 진짜 관심도
+
+---
+
+## 📊 개발 히스토리
+
+### 2025-10-19: Gemini AI 최적화 및 로딩 UI 개선 ⭐
+
+**완료된 작업**:
+
+1. **Gemini API 연동 테스트 및 수정**
+   - ✅ 모델 이름 수정: `gemini-1.5-pro` → `models/gemini-flash-latest`
+   - ✅ Website Analysis Service: 광고주 웹사이트 자동 분석
+   - ✅ Analysis Service: 검색어 상업적 가치 AI 분석
+   - ✅ 실제 테스트: Nike 웹사이트 분석 성공
+
+2. **타임아웃 최적화**
+   - 문제: 4초 타임아웃 → AI 항상 실패 (실제 소요 4.5~5초)
+   - 시도1: 2초 → 여전히 실패
+   - 최종: 10초 + 로딩 UI (품질 우선, UX 확보)
+
+3. **로딩 UI 개선**
+   - 프론트엔드에 명확한 로딩 메시지 추가
+   - "🤖 AI가 검색어 가치를 분석하고 있습니다..."
+   - "상업적 의도, 구체성, 구매 단계를 평가 중입니다 (약 5~10초 소요)"
+   - 애니메이션 점 추가
+
+4. **테스트 결과**
+   - Website Analysis: Nike → 키워드 20개 + 카테고리 5개 생성
+   - Analysis Service: 5개 검색어 분석 성공
+   - AI 정확도: 5개 중 3개 완벽 일치
+
+**기술적 해결**:
+- `google-generativeai` SDK 버전 호환성 해결
+- 모델 네이밍 규칙 변경 대응
+- 타임아웃 전략 최적화
+
+**파일 변경**:
+- `services/website-analysis-service/main.py` - 모델 이름 수정
+- `services/analysis-service/ai_analyzer.py` - 모델 이름 수정
+- `services/analysis-service/main.py` - 타임아웃 10초, 로그 개선
+- `app/page.tsx` - 로딩 UI 개선
+- `docker-compose.yml` - Gemini 설정 추가
+- `README.md` - AI 분석 섹션 추가
+
+### 2025-10-13: 2단계 하이브리드 SLA 시스템 완성
+
+**문제 해결**:
+1. ✅ 무한 루프 버그 수정 (onComplete ref 관리)
+2. ✅ Cross-origin 제약 우회 (visibilitychange 활용)
+3. ✅ 역설적 평가 기준 개선 (클릭 = 가치)
+4. ✅ UX 개선 (즉시 리다이렉트)
+
+**추가된 파일**:
+- `app/components/ReturnTracker.tsx` - 복귀 감지
+- `app/api/verify-return/route.ts` - 2차 평가 API
+- `database/migration_add_clicked_to_delivery_metrics.sql`
+
+**수정된 파일**:
+- `app/lib/hooks/useSlaTracker.ts` - 단순화
+- `app/layout.tsx` - ReturnTracker 추가
+- `app/page.tsx` - localStorage 저장
+- `app/api/track-redirect/route.ts` - 즉시 리다이렉트
+- `services/verification-service/main.py` - 2단계 평가 로직
+- `services/api-gateway/main.py` - 라우팅 추가
+
+**측정 결과**:
+- ✅ t_dwell_on_ad_site: 0초 → 84.22초 (성공)
+- ✅ 무한 루프: 발생 → 해결
+- ✅ UX: 3초 대기 → 즉시 이동
+
+### 2025-10-12: SLA 검증 기반 정산 시스템 도입
+
+**아키텍처 변경**:
+- "클릭 즉시 정산" → "SLA 검증 후 정산"
+- User Service → Settlement Service로 정산 로직 분리
+
+**추가된 서비스**:
+- Settlement Service (포트 8008)
+- Verification Service 확장 (/verify-delivery)
+
+**데이터베이스**:
+- `delivery_metrics` 테이블 생성
+- `settlements` 테이블 생성
+- `transactions.status` 확장
+
+### 2025-09-20: AI 품질 평가 시스템 도입
+
+**Gemini API 연동**:
+- Google Gemini 1.5 Flash 모델 (초기)
+- 하이브리드 분석 (AI + 레거시)
+- 실시간 품질 점수 (0-100점)
+
+**광고주 키워드 매칭**:
+- 토큰 기반 매칭 알고리즘
+- 카테고리 기반 폴백
+- 동적 입찰가 계산
+
+---
+
+## 🛠️ 프로젝트 구조
 
 ```
 gatekeeper/
-├── app/                          # Next.js 프론트엔드 (App Router)
-│   ├── (auth)/                   # 인증 관련 페이지 그룹
-│   │   ├── login/page.tsx        # 로그인 페이지
-│   │   └── register/page.tsx     # 회원가입 페이지
-│   ├── admin/                    # 관리자 페이지
-│   │   ├── login/page.tsx        # 관리자 로그인
-│   │   └── advertiser-review/page.tsx # 광고주 심사 관리
-│   ├── advertiser/               # 광고주 페이지
-│   │   ├── dashboard/page.tsx    # 광고주 대시보드
-│   │   └── auto-bidding/page.tsx # 자동입찰 관리
-│   ├── api/                      # API 프록시 엔드포인트
-│   │   ├── admin/                # 관리자 API
-│   │   │   ├── login/route.ts    # 관리자 로그인 API
-│   │   │   └── advertiser-review/ # 광고주 심사 API
-│   │   ├── advertiser/           # 광고주 API
-│   │   │   ├── dashboard/        # 광고주 대시보드 API
-│   │   │   ├── auto-bid/         # 자동입찰 API
-│   │   │   ├── bid-history/      # 입찰 이력 API
-│   │   │   └── review-status/    # 심사 상태 API
-│   │   ├── auction/              # 경매 API
-│   │   │   ├── [searchId]/       # 검색별 경매 API
-│   │   │   └── select/           # 입찰 선택 API
-│   │   ├── auth/                 # 인증 API
-│   │   │   ├── login/route.ts    # 로그인 API
-│   │   │   └── register/route.ts # 회원가입 API
-│   │   ├── click/                # 클릭 추적 API
-│   │   │   ├── [searchId]/[bidId]/ # 검색별 클릭 통계
-│   │   │   └── route.ts          # 클릭 API
-│   │   ├── track-click/route.ts  # 클릭 추적 및 보상 지급
-│   │   ├── evaluate-quality/route.ts # 품질 평가 API
-│   │   ├── search/route.ts       # 검색 API
-│   │   ├── user/                 # 사용자 API
-│   │   │   ├── dashboard/        # 사용자 대시보드 API
-│   │   │   ├── quality-score/    # 품질 점수 API
-│   │   │   └── submission/       # 제출 관리 API
-│   │   └── verify/route.ts       # 검증 API
-│   ├── components/               # React 컴포넌트
-│   │   ├── admin/                # 관리자 컴포넌트
-│   │   │   ├── AdvertiserReviewCard.tsx
-│   │   │   ├── KeywordEditor.tsx
-│   │   │   └── CategorySelector.tsx
-│   │   ├── advertiser/           # 광고주 컴포넌트
-│   │   │   ├── AutoBidAnalytics.tsx
-│   │   │   ├── BidHistory.tsx
-│   │   │   └── KeywordManager.tsx
-│   │   ├── dashboard/            # 대시보드 컴포넌트
-│   │   │   ├── EarningsSummary.tsx
-│   │   │   ├── QualityHistory.tsx
-│   │   │   ├── SubmissionLimitCard.tsx
-│   │   │   └── TransactionHistory.tsx
-│   │   ├── main/                 # 메인 페이지 컴포넌트
-│   │   │   ├── SearchInput.tsx
-│   │   │   ├── AuctionStatus.tsx
-│   │   │   └── QualityAdvisor.tsx
-│   │   ├── ui/                   # 공통 UI 컴포넌트
-│   │   │   ├── ErrorBoundary.tsx
-│   │   │   ├── ErrorFallback.tsx
-│   │   │   ├── Skeleton.tsx
-│   │   │   └── RewardModal.tsx
-│   │   ├── AuthForm.tsx          # 인증 폼 컴포넌트
-│   │   └── Header.tsx            # 헤더 컴포넌트
-│   ├── dashboard/page.tsx        # 사용자 대시보드 페이지
-│   ├── lib/                      # 공통 라이브러리
-│   │   ├── hooks/                # 커스텀 훅
+├── app/                                    # Next.js (App Router)
+│   ├── (auth)/login, register              # 인증
+│   ├── admin/                              # 관리자
+│   ├── advertiser/                         # 광고주
+│   │   ├── dashboard/                      # 대시보드
+│   │   ├── auto-bidding/                   # 자동입찰
+│   │   └── review-suggestions/             # AI 제안 검토 ⭐
+│   ├── dashboard/                          # 사용자 대시보드
+│   ├── api/                                # API 프록시
+│   │   ├── evaluate-quality/               # AI 품질 평가 ⭐
+│   │   ├── track-click/                    # 클릭 추적
+│   │   ├── verify-delivery/                # 1차 SLA 평가
+│   │   ├── verify-return/                  # 2차 SLA 평가
+│   │   ├── track-redirect/                 # 리다이렉트
+│   │   └── advertiser/
+│   │       ├── ai-suggestions/             # AI 제안 조회 ⭐
+│   │       └── confirm-suggestions/        # AI 제안 승인 ⭐
+│   ├── components/
+│   │   ├── ReturnTracker.tsx               # 복귀 감지
+│   │   ├── main/
+│   │   │   ├── SearchInput.tsx             # 검색 입력 (로딩 UI) ⭐
+│   │   │   ├── QualityAdvisor.tsx          # AI 분석 결과 표시 ⭐
+│   │   │   └── AuctionStatus.tsx
+│   │   ├── dashboard/
+│   │   ├── admin/
+│   │   └── advertiser/
+│   │       ├── AnalysisStatusBanner.tsx    # AI 분석 상태 ⭐
+│   │       └── AutoBidAnalytics.tsx
+│   ├── lib/
+│   │   ├── hooks/
+│   │   │   ├── useSlaTracker.ts            # SLA 추적
+│   │   │   ├── useAnalysisStatus.ts        # AI 분석 상태 ⭐
 │   │   │   ├── useDashboardData.ts
 │   │   │   └── useDebounce.ts
-│   │   ├── utils/                # 유틸리티
-│   │   │   └── errorMonitor.ts
-│   │   ├── actions.ts            # 서버 액션
-│   │   ├── admin-auth.ts         # 관리자 인증
-│   │   ├── auth.ts               # 사용자 인증
-│   │   ├── database.ts           # 데이터베이스 연결
-│   │   ├── types.ts              # 타입 정의
-│   │   └── utils.ts              # 공통 유틸리티
-│   ├── providers.tsx             # React Query Provider
-│   ├── layout.tsx                # 전역 레이아웃
-│   └── page.tsx                  # 메인 페이지
-├── services/                     # 마이크로서비스 (Python FastAPI)
-│   ├── api-gateway/              # API 게이트웨이
-│   │   ├── main.py               # 게이트웨이 메인
-│   │   ├── Dockerfile
+│   │   └── auth.ts, types.ts, utils.ts
+│   └── layout.tsx, page.tsx
+├── services/                               # Python Microservices
+│   ├── api-gateway/                        # 8000
+│   ├── analysis-service/                   # 8001 (검색어 AI 분석) ⭐
+│   │   ├── main.py                         # FastAPI 앱
+│   │   ├── ai_analyzer.py                  # Gemini API 연동 ⭐
+│   │   ├── legacy_analyzer.py              # 레거시 분석
 │   │   └── requirements.txt
-│   ├── analysis-service/         # 데이터 분석 서비스 (포트 8001)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── auction-service/          # 경매 서비스 (포트 8002)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── utils/                # 유틸리티 모듈
-│   │   │   ├── sign.py
-│   │   │   └── __init__.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── payment-service/          # 결제 서비스 (포트 8003)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── verification-service/     # 검증 서비스 (포트 8004)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── utils/                # 유틸리티 모듈
-│   │   │   ├── sign.py
-│   │   │   └── __init__.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── user-service/             # 사용자 서비스 (포트 8005)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── update_passwords.py   # 비밀번호 업데이트 스크립트
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── quality-service/          # 품질 관리 서비스 (포트 8006)
-│   │   ├── main.py
-│   │   ├── database.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   └── advertiser-service/       # 광고주 서비스 (포트 8007)
-│       ├── main.py
-│       ├── database.py
-│       ├── auto_bid_optimizer.py # 자동입찰 최적화 모듈
-│       ├── Dockerfile
-│       └── requirements.txt
-├── database/                     # 데이터베이스 스키마 및 마이그레이션
-│   ├── init.sql                  # 초기 데이터베이스 설정
-│   ├── migration_add_transaction_columns.sql      # 트랜잭션 테이블 컬럼 추가
-│   ├── migration_add_transaction_constraints.sql  # 유니크 제약조건 추가
-│   ├── migration_click_tracking.sql               # 클릭 추적 테이블
-│   ├── migration_correct_daily_submissions.sql    # Daily submissions 보정
-│   ├── run_migration.sh          # 마이그레이션 실행 스크립트 (Linux/Mac)
-│   ├── run_migration.bat         # 마이그레이션 실행 스크립트 (Windows)
-│   ├── run_correction_migration.sh # 보정 마이그레이션 (Linux/Mac)
-│   └── run_correction_migration.bat # 보정 마이그레이션 (Windows)
-├── terraform/                    # AWS 인프라 코드 (IaC)
-│   ├── main.tf                   # 메인 인프라 정의
-│   ├── variables.tf              # 변수 정의
-│   └── terraform.tfvars.example  # 변수 예시 파일
-├── public/                       # 정적 파일
-│   ├── favicon.ico
-│   ├── next.svg
-│   ├── vercel.svg
-│   └── window.svg
-├── test_*.py                     # 테스트 스크립트들 (6개 파일)
-├── setup_services.bat           # 서비스 설정 스크립트 (Windows)
-├── setup_services.sh            # 서비스 설정 스크립트 (Linux/Mac)
-├── start-dev.bat                # 개발 환경 시작 (Windows)
-├── docker-compose.yml           # 로컬 개발 환경
-├── Dockerfile                   # 프로덕션 Docker 이미지
-├── Dockerfile.dev               # 개발용 Docker 이미지
-├── package.json                 # Node.js 의존성
-├── next.config.ts               # Next.js 설정
-├── tsconfig.json                # TypeScript 설정
-├── env.example                  # 환경 변수 예시
-├── VERIFICATION_CHECKLIST.md    # 검증 체크리스트
-├── SECURITY_UPGRADE_REPORT.md   # 보안 강화 보고서
-├── PYTHON_SETUP_README.md       # Python 설정 가이드
-└── README.md                    # 프로젝트 문서
+│   ├── auction-service/                    # 8002
+│   ├── verification-service/               # 8004 (2단계 평가)
+│   ├── user-service/                       # 8005
+│   ├── quality-service/                    # 8006
+│   ├── advertiser-service/                 # 8007
+│   ├── settlement-service/                 # 8008
+│   └── website-analysis-service/           # 8009 (웹사이트 AI 분석) ⭐
+│       ├── main.py                         # FastAPI 앱
+│       ├── database.py                     # DB 연결
+│       ├── requirements.txt                # Playwright, Gemini
+│       └── Dockerfile
+├── database/
+│   ├── init.sql
+│   ├── migration_add_sla_tables.sql
+│   ├── migration_add_clicked_to_delivery_metrics.sql
+│   ├── migration_add_ai_analysis_data.sql  # ⭐ AI 분석 데이터
+│   ├── migration_add_ai_onboarding_features.sql  # ⭐ 광고주 AI
+│   └── run_*.sh, run_*.bat
+└── docker-compose.yml
 ```
 
-## 🔧 주요 기능
+---
 
-### 1. 데이터 가치 평가 (Analysis Service)
-- 검색어의 구체성 분석
-- 상업적 가치 점수 계산
-- 품질 개선 제안 제공
+## 🔧 개발 환경 설정
 
-### 2. 역경매 시스템 (Auction Service)
-- 실시간 역경매 생성
-- 다중 플랫폼 입찰 처리
-- 경매 상태 관리
+### 환경 변수 (.env)
 
-### 3. 보상 시스템 (Payment Service)
-- 1차/2차 보상 지급
-- 거래 내역 관리
-- 결제 처리
-
-### 4. 검증 시스템 (Verification Service)
-- 2차 보상 증빙 검증
-- OCR 기반 문서 분석
-- 검증 결과 관리
-
-### 5. 사용자 관리 (User Service)
-- 사용자 대시보드
-- 수익 통계
-- 품질 이력 관리
-
-### 6. 품질 관리 (Quality Service)
-- 동적 제출 한도 계산
-- 품질 점수 기반 제한 관리
-
-### 7. 광고주 관리 (Advertiser Service)
-- 광고주 회원가입 및 인증
-- 자동입찰 시스템
-- 머신러닝 기반 입찰 최적화
-- 광고주 대시보드 및 성과 분석
-
-### 8. 관리자 시스템 (Admin Panel)
-- **관리자 인증**: JWT 기반 관리자 로그인 시스템
-- **광고주 심사**: 광고주 회원가입 승인/거절 관리
-- **심사 상태 관리**: 대기/승인/거절 상태별 조회 및 업데이트
-- **데이터 수정**: 광고주 키워드 및 카테고리 수정 권한
-- **심사 메모**: 관리자별 심사 의견 및 권고 입찰가 설정
-
-### 9. 클릭 추적 및 보상 시스템 (Enhanced)
-- **실시간 클릭 추적**: 사용자별 광고 클릭 패턴 분석
-- **멱등성 보장**: 중복 클릭 방지 및 데이터 정합성 유지
-- **일일 한도 관리**: 품질 점수 기반 동적 제출 한도 적용
-- **보상 차등화**: 입찰 광고와 폴백 광고별 차등 보상 지급
-
-### 10. 대시보드 시스템 (Enhanced)
-- **실시간 데이터 연동**: 모든 통계가 실제 DB 데이터 기반
-- **에러 처리**: 네트워크 에러, 로딩 실패 등에 대한 재시도 버튼
-- **로딩 상태**: Skeleton UI와 독립적 로딩 스피너
-- **실시간 업데이트**: React Query를 통한 캐싱 및 백그라운드 업데이트
-- **에러 모니터링**: 자동 에러 로깅 및 복구 메커니즘
-
-## 🛠️ 기술 스택
-
-### Frontend
-- **Next.js 14** (App Router)
-- **TypeScript**
-- **React 18**
-- **Tailwind CSS**
-- **React Query** (데이터 페칭 및 캐싱)
-- **Lucide React** (아이콘)
-- **Recharts** (차트 라이브러리)
-
-### Backend (Microservices)
-- **FastAPI** (Python)
-- **Pydantic** (데이터 검증)
-- **Uvicorn** (ASGI 서버)
-
-### Infrastructure
-- **AWS API Gateway** (API 관리)
-- **AWS Application Load Balancer** (로드 밸런싱)
-- **Terraform** (인프라 코드)
-- **Docker** (컨테이너화)
-
-## 🔒 보안
-
-- 모든 API 요청에 CSRF 토큰 포함
-- 입력 데이터 검증 및 sanitization
-- XSS 방지를 위한 출력 이스케이핑
-- 적절한 인증 및 권한 검사
-
-## 📊 성능 최적화
-
-- Next.js Image 컴포넌트 사용
-- 코드 스플리팅 및 동적 임포트
-- 폰트 최적화 (next/font)
-- 불필요한 리렌더링 방지
-- React Query를 통한 데이터 캐싱
-- 백그라운드 데이터 갱신
-- 낙관적 업데이트
-
-## 🛡️ 에러 처리 및 모니터링
-
-### 에러 처리
-- **ErrorBoundary**: 컴포넌트 레벨 에러 캐치
-- **재시도 메커니즘**: 네트워크 에러 시 자동 재시도
-- **Fallback UI**: 에러 상태에 대한 사용자 친화적 UI
-- **부분적 로딩**: 일부 데이터 실패 시에도 다른 섹션 정상 표시
-
-### 로딩 상태
-- **Skeleton UI**: 로딩 중 콘텐츠 구조 미리보기
-- **독립적 로딩**: 각 섹션별 개별 로딩 상태
-- **점진적 로딩**: 중요한 데이터부터 우선 표시
-
-### 에러 모니터링
-- **자동 로깅**: 모든 에러의 자동 수집 및 분류
-- **에러 분류**: 네트워크, 런타임, 인증 등 유형별 분류
-- **심각도 평가**: 에러의 중요도에 따른 우선순위 설정
-- **사용자별 추적**: 개별 사용자의 에러 패턴 분석
-
-## 📈 대시보드 시스템 개선사항
-
-### 실시간 데이터 연동
-- **수익 요약**: 이번달/지난달 수익 비교 및 성장률 계산
-- **품질 이력**: 실제 품질 점수 기반 4주간 추이 차트
-- **제출 한도**: 실시간 사용량 및 품질 점수 기반 한도 표시
-- **통계 데이터**: 월간 검색 횟수, 성공률, 평균 품질 점수
-
-### 사용자 경험 개선
-- **React Query**: 캐싱 및 백그라운드 데이터 갱신
-- **실시간 업데이트**: 30초마다 자동 데이터 갱신
-- **탭 포커스**: 브라우저 탭 활성화 시 데이터 갱신
-- **낙관적 업데이트**: 사용자 액션에 대한 즉각적인 UI 반영
-
-### 안정성 향상
-- **에러 격리**: 한 컴포넌트의 에러가 전체 대시보드에 영향 없음
-- **자동 복구**: 네트워크 복구 시 자동 데이터 갱신
-- **에러 히스토리**: 로컬 스토리지에 에러 기록 저장
-- **성능 최적화**: 불필요한 API 호출 방지 및 효율적인 캐싱
-
-## 🆕 최신 업데이트 (2025-01-20)
-
-### ✅ 회원가입 시스템 완전 수정 및 에러 해결 (2025-09-14)
-
-#### **광고주 회원가입 시스템 완전 개선**
-- **문제**: 422 Unprocessable Entity 오류로 광고주 회원가입 실패
-- **원인**: Next.js API 라우트의 Zod 스키마가 백엔드 Pydantic 모델과 불일치
-- **해결**: 
-  - Zod 스키마를 백엔드 규칙과 완벽 동기화
-  - `username` 필드 자동 생성 (이메일 → username 변환)
-  - 백엔드가 기대하는 필드명으로 데이터 변환 (`companyName` → `company_name`, `businessSetup` → `business_setup`)
-  - API 라우팅 수정 (광고주는 `/api/advertiser/register`로, 일반 사용자는 `/api/auth/register`로)
-
-#### **일반 사용자 회원가입 시스템 개선**
-- **문제**: 일반 사용자도 `companyName`, `businessSetup` 필드 요구로 인한 422 오류
-- **해결**: 
-  - 조건부 Zod 스키마 적용 (`z.discriminatedUnion` 사용)
-  - 광고주용/일반 사용자용 스키마 분리
-  - userType에 따른 데이터 처리 로직 분기
-
-#### **어드민 승인 시스템 완전 수정**
-- **문제**: 403 Forbidden 오류로 광고주 승인 불가
-- **원인**: 
-  1. JWT 검증 시 `issuer`/`audience` 클레임 미확인
-  2. PUT/PATCH 요청 시 Authorization 헤더 누락
-- **해결**:
-  - JWT 검증에 `issuer`/`audience` 클레임 확인 추가
-  - PUT/PATCH 요청에 Authorization 헤더 전달 추가
-  - 어드민 인증 완전 수정
-
-#### **기술적 개선사항**
-- **의존성 추가**: `zod` 패키지 설치
-- **아이콘 수정**: `Switch` → `ToggleLeft`로 변경 (lucide-react 호환성)
-- **에러 처리 강화**: 백엔드 에러 메시지를 프론트엔드로 완전 전달
-- **자동 로그인 방지**: 회원가입 후 의도치 않은 로그인 시도 차단
-
-#### **주요 수정 파일들**
-```
-app/api/auth/register/route.ts          # 회원가입 API 완전 수정
-app/lib/admin-auth.ts                   # 어드민 JWT 검증 수정
-app/api/admin/advertiser-review/route.ts # 어드민 API 헤더 전달 수정
-app/components/AuthForm.tsx             # 자동 로그인 방지 로직 추가
-app/components/advertiser/AutoBidToggle.tsx # 아이콘 수정
-```
-
-#### **에러 해결 과정 및 실수 방지 가이드**
-
-##### **1. 422 Unprocessable Entity 오류 해결**
-```typescript
-// ❌ 잘못된 방법 (기존)
-const ClientSchema = z.object({
-  userType: z.enum(['advertiser', 'user']),
-  email: z.string().email(),
-  password: z.string().min(8),
-  companyName: z.string().min(1), // 모든 사용자에게 필수
-  businessSetup: BusinessSetupSchema, // 모든 사용자에게 필수
-});
-
-// ✅ 올바른 방법 (수정 후)
-const AdvertiserSchema = BaseSchema.extend({
-  userType: z.literal('advertiser'),
-  companyName: z.string().min(1, { message: "회사명은 필수입니다." }).max(100),
-  businessSetup: BusinessSetupSchema,
-});
-
-const UserSchema = BaseSchema.extend({
-  userType: z.literal('user'),
-  username: z.string().min(1, { message: "사용자명은 필수입니다." }).max(50),
-});
-
-const ClientSchema = z.discriminatedUnion('userType', [
-  AdvertiserSchema,
-  UserSchema,
-]);
-```
-
-##### **2. 백엔드 데이터 구조 맞추기**
-```typescript
-// ❌ 잘못된 방법 (기존)
-const backendPayload = {
-  ...clientData,
-  username: clientData.email, // 백엔드 규칙 위반
-};
-
-// ✅ 올바른 방법 (수정 후)
-const backendPayload = {
-  username: emailUsername, // 이메일 기반 username 생성
-  email: clientData.email,
-  password: clientData.password,
-  company_name: clientData.companyName, // snake_case 변환
-  business_setup: { // snake_case 변환
-    ...clientData.businessSetup,
-    categories: numericCategories, // string → number 변환
-  },
-};
-```
-
-##### **3. API 라우팅 수정**
-```typescript
-// ❌ 잘못된 방법 (기존)
-const response = await fetch(`${process.env.API_GATEWAY_URL}/api/auth/register`, {
-  // 모든 요청이 user-service로만 라우팅됨
-});
-
-// ✅ 올바른 방법 (수정 후)
-const endpoint = clientData.userType === 'advertiser' 
-  ? '/api/advertiser/register'  // 광고주는 advertiser-service로
-  : '/api/auth/register';       // 일반 사용자는 user-service로
-
-const response = await fetch(`${process.env.API_GATEWAY_URL}${endpoint}`, {
-  // userType에 따른 올바른 라우팅
-});
-```
-
-##### **4. JWT 검증 수정**
-```typescript
-// ❌ 잘못된 방법 (기존)
-const { payload } = await jwtVerify(token, SECRET_KEY)
-// issuer/audience 클레임 확인 안함
-
-// ✅ 올바른 방법 (수정 후)
-const issuer = process.env.JWT_ISSUER || 'digisafe-api'
-const audience = process.env.JWT_AUDIENCE || 'digisafe-client'
-
-const { payload } = await jwtVerify(token, SECRET_KEY, {
-  issuer: issuer,
-  audience: audience
-})
-```
-
-##### **5. Authorization 헤더 전달**
-```typescript
-// ❌ 잘못된 방법 (기존)
-const response = await fetch(`${advertiserServiceUrl}/admin/update-review`, {
-  method: 'PUT',
-  // Authorization 헤더 누락
-});
-
-// ✅ 올바른 방법 (수정 후)
-const authHeader = request.headers.get('authorization')
-const response = await fetch(`${advertiserServiceUrl}/admin/update-review`, {
-  method: 'PUT',
-  headers: {
-    'Authorization': authHeader || '',
-    'Content-Type': 'application/json'
-  }
-});
-```
-
-#### **실수 방지를 위한 체크리스트**
-
-##### **회원가입 시스템 개발 시**
-- [ ] **Zod 스키마**: 백엔드 Pydantic 모델과 완전 일치하는지 확인
-- [ ] **필드명 변환**: camelCase → snake_case 변환 로직 포함
-- [ ] **조건부 검증**: userType에 따른 다른 스키마 적용
-- [ ] **API 라우팅**: userType에 따른 올바른 엔드포인트 선택
-- [ ] **username 생성**: 이메일 기반 username 변환 로직 포함
-
-##### **어드민 시스템 개발 시**
-- [ ] **JWT 검증**: issuer/audience 클레임 확인 포함
-- [ ] **헤더 전달**: 모든 API 요청에 Authorization 헤더 전달
-- [ ] **에러 처리**: 백엔드 에러 메시지를 프론트엔드로 전달
-- [ ] **자동 로그인 방지**: 회원가입 후 localStorage 정리
-
-##### **Docker 빌드 시**
-- [ ] **의존성 확인**: 새로운 패키지 설치 후 Docker 재빌드
-- [ ] **아이콘 호환성**: lucide-react 버전에 맞는 아이콘 사용
-- [ ] **빌드 로그 확인**: 컴파일 오류나 경고 메시지 확인
-- [ ] **로컬 테스트**: Docker 빌드 전 로컬에서 `npm run build` 테스트
-
-##### **에러 디버깅 시**
-- [ ] **브라우저 콘솔**: 상세한 에러 메시지 확인
-- [ ] **네트워크 탭**: API 요청/응답 헤더 및 본문 확인
-- [ ] **백엔드 로그**: Docker 로그에서 실제 오류 원인 파악
-- [ ] **데이터베이스**: 중복 데이터나 제약 조건 위반 확인
-
-## 🆕 최신 업데이트 (2025-01-20)
-
-### ✅ 새로운 API 엔드포인트 및 기능 추가
-
-#### **클릭 추적 및 보상 시스템**
-- **`/api/track-click`**: 광고 클릭 추적 및 보상 지급 API
-  - 사용자 인증 기반 클릭 추적
-  - 일일 제출 한도 검증 및 차감
-  - 입찰 광고/폴백 광고 구분 처리
-  - 멱등성 보장으로 중복 클릭 방지
-
-#### **관리자 시스템 강화**
-- **`/api/admin/login`**: 관리자 로그인 시스템
-- **`/api/admin/advertiser-review`**: 광고주 심사 관리
-  - 심사 대기/승인/거절 상태별 조회
-  - 광고주 데이터 수정 (키워드, 카테고리)
-  - 심사 결과 업데이트 및 메모 관리
-
-#### **품질 평가 시스템**
-- **`/api/evaluate-quality`**: 검색어 품질 평가 API
-- **`/api/click/[searchId]`**: 검색별 클릭 통계 API
-
-### ✅ 데이터베이스 마이그레이션 및 스키마 개선
-
-#### **Transactions 테이블 강화**
-- **누락된 컬럼 추가**: `search_id`, `bid_id`, `ad_type` 컬럼 추가
-- **유니크 제약조건**: 일일 중복 트랜잭션 방지
-- **트랜잭션 날짜 관리**: 자동 날짜 설정 트리거 추가
-- **성능 최적화**: 인덱스 추가로 쿼리 성능 향상
-
-#### **Daily Submissions 정합성 보장**
-- **트랜잭션 기준 사용량 계산**: 실제 거래 건수 기반 정확한 사용량 표시
-- **멱등성 보장**: 동일한 (user_id, search_id, bid_id) 조합 중복 방지
-- **자동 보정 시스템**: 데이터 불일치 시 자동 수정
-
-### ✅ Advertiser Service 추가 및 최적화
-
-#### **새로운 서비스 추가**
-- **Advertiser Service (포트 8007)**: 광고주 관리 및 자동입찰 시스템
-- **머신러닝 기반 입찰 최적화**: AutoBidOptimizer를 통한 지능형 입찰가 계산
-- **광고주 대시보드**: 실시간 성과 분석 및 통계 제공
-- **자동입찰 시스템**: 품질 점수, 경쟁 상황, 예산 등을 고려한 자동 입찰
-
-#### **주요 기능**
-- **광고주 회원가입/로그인**: JWT 기반 인증 시스템
-- **비즈니스 설정**: 키워드, 카테고리, 예산 설정
-- **심사 시스템**: 관리자 승인 기반 광고주 활성화
-- **성과 분석**: 키워드별, 시간대별 입찰 성과 분석
-- **최적화 제안**: AI 기반 입찰 전략 개선 제안
-
-#### **기술적 개선사항**
-- **타입 안전성**: 모든 Record 타입 에러 해결
-- **비동기 데이터베이스**: `postgresql+asyncpg://` 드라이버 사용
-- **JWT 통일**: 게이트웨이와 동일한 시크릿 키 사용
-- **환경변수 최적화**: 모든 서비스 URL 및 설정 통합
-
-#### **환경변수 설정 개선**
 ```bash
-# JWT 보안 (게이트웨이와 통일)
-JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production-must-be-32-chars-minimum
+# JWT 보안
+JWT_SECRET_KEY=your-production-secret-key-32-chars-minimum
 JWT_ISSUER=digisafe-api
 JWT_AUDIENCE=digisafe-client
 
-# 데이터베이스 (비동기 드라이버)
-DATABASE_URL=postgresql+asyncpg://admin:your_secure_password_123@localhost:5433/search_exchange_db
+# AI 서비스 ⭐ 필수!
+GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_MODEL=models/gemini-flash-latest
 
-# 모든 서비스 URL (게이트웨이용)
-ADVERTISER_SERVICE_URL=http://localhost:8007
-ANALYSIS_SERVICE_URL=http://localhost:8001
-VERIFICATION_SERVICE_URL=http://localhost:8004
+# 데이터베이스
+DATABASE_URL=postgresql://admin:password@localhost:5433/search_exchange_db
+
+# 서비스 URL (Docker에서 자동 설정)
+API_GATEWAY_URL=http://api-gateway:8000
+ANALYSIS_SERVICE_URL=http://analysis-service:8001
+AUCTION_SERVICE_URL=http://auction-service:8002
+VERIFICATION_SERVICE_URL=http://verification-service:8004
+USER_SERVICE_URL=http://user-service:8005
+QUALITY_SERVICE_URL=http://quality-service:8006
+ADVERTISER_SERVICE_URL=http://advertiser-service:8007
+SETTLEMENT_SERVICE_URL=http://settlement-service:8003
+WEBSITE_ANALYSIS_SERVICE_URL=http://website-analysis-service:8009
 ```
 
-#### **코드 품질 향상**
-- **에러 처리**: Record 타입을 dict로 변환하여 안전한 데이터 접근
-- **보안 강화**: 하드코딩된 시크릿 키 제거
-- **메모리 효율성**: 불필요한 import 제거로 19.4% 코드 라인 감소
-- **런타임 안정성**: 모든 타입 에러 해결
+### 로컬 개발 (개별 서비스)
 
-## 📊 데이터베이스 마이그레이션 가이드
-
-### 마이그레이션 파일들
-- **`migration_add_transaction_columns.sql`**: transactions 테이블 누락 컬럼 추가
-- **`migration_add_transaction_constraints.sql`**: 유니크 제약조건 및 트리거 추가
-- **`migration_correct_daily_submissions.sql`**: daily_submissions 데이터 정합성 보정
-- **`migration_click_tracking.sql`**: 클릭 추적 테이블 추가
-
-### 마이그레이션 실행 방법
-
-#### Windows 사용자
 ```bash
-cd database
-run_migration.bat                    # 기본 마이그레이션
-run_correction_migration.bat         # 데이터 보정 마이그레이션
-```
+# Frontend
+npm install
+npm run dev
 
-#### Linux/macOS 사용자
-```bash
-cd database
-./run_migration.sh                   # 기본 마이그레이션
-./run_correction_migration.sh        # 데이터 보정 마이그레이션
-```
-
-### 마이그레이션 검증
-```sql
--- Transactions 테이블 컬럼 확인
-SELECT column_name, data_type, is_nullable 
-FROM information_schema.columns 
-WHERE table_name = 'transactions' 
-AND column_name IN ('search_id', 'bid_id', 'ad_type');
-
--- Daily Submissions 정합성 확인
-SELECT 
-  ds.user_id,
-  ds.submission_count AS daily_submissions_count,
-  COALESCE(tx.tx_count, 0) AS transactions_count,
-  CASE 
-    WHEN ds.submission_count = COALESCE(tx.tx_count, 0) THEN '✅ 일치'
-    ELSE '❌ 불일치'
-  END AS status
-FROM daily_submissions ds
-LEFT JOIN (
-  SELECT user_id, COUNT(*)::int AS tx_count
-  FROM transactions
-  WHERE created_at::date = CURRENT_DATE
-  GROUP BY user_id
-) tx ON ds.user_id = tx.user_id
-WHERE ds.submission_date = CURRENT_DATE;
-```
-
-## 🔧 최근 해결된 문제점들
-
-### ✅ 데이터 흐름 연결 완료
-- **검색 → 데이터 저장**: 검색할 때마다 `search_queries` 테이블에 자동 저장
-- **품질 점수 이력**: 검색 시 품질 점수가 `user_quality_history` 테이블에 주차별 저장
-- **일일 제출 현황**: 검색할 때마다 `daily_submissions` 테이블에 제출 횟수 업데이트
-- **경매 상태 관리**: 입찰 선택 시 경매 상태를 'completed'로 자동 업데이트
-
-### ✅ 실시간 통계 계산
-- **Quality History**: 실제 품질 점수 기반 4주간 추이 차트 표시
-- **Daily Submission Limit**: 품질 점수에 따른 동적 제출 한도 계산 및 표시
-- **Total Searches**: 이번달 실제 검색 횟수 카운트
-- **Success Rate**: 완료된 경매 대비 전체 경매 비율 계산
-- **Avg Quality Score**: 실제 검색 쿼리의 평균 품질 점수 계산
-
-### ✅ 인증 시스템 강화
-- **JWT 토큰 검증**: 모든 API 요청에 사용자 인증 필수
-- **개인화된 데이터**: 사용자별 고유한 대시보드 데이터 제공
-- **보안 강화**: 인증되지 않은 요청 차단
-
-### ✅ 자동 데이터 갱신
-- **검색 완료 시**: 대시보드 통계 자동 갱신
-- **경매 완료 시**: 수익 및 거래 내역 자동 업데이트
-- **이벤트 기반 갱신**: 사용자 액션에 따른 즉시 데이터 반영
-
-## 🧪 테스트 및 검증 가이드
-
-### Daily 사용량 통일 검증 체크리스트
-
-#### 1. 환경 설정 확인
-- [ ] `.env` 파일에 `DEFAULT_DAILY_LIMIT=5` 설정 확인
-- [ ] 데이터베이스 마이그레이션 실행 완료
-  - [ ] `migration_add_transaction_constraints.sql` 실행
-  - [ ] `migration_correct_daily_submissions.sql` 실행
-
-#### 2. 로그인 → 대시보드 확인
-- [ ] 로그인 성공
-- [ ] `/dashboard` 접근 시 Today's Usage가 `0/5`로 표시
-- [ ] 검색만 여러 번 해도 사용량 변동 없음 (0/5 유지)
-
-#### 3. 광고 클릭 → 보상 지급 테스트
-- [ ] 검색 후 입찰 광고 클릭
-- [ ] 네트워크 탭에서 `/api/user/earnings` 1회만 호출 확인
-- [ ] 대시보드 Today's Usage가 `1/5`로 갱신
-- [ ] 거래 1건 생성 확인
-
-#### 4. 중복 클릭 방지 테스트
-- [ ] 동일한 광고를 빠르게 여러 번 클릭
-- [ ] `/api/user/earnings`에서 멱등성 응답 확인
-- [ ] 사용량이 중복으로 증가하지 않음
-
-#### 5. 일일 한도 초과 테스트
-- [ ] 5번째 광고 클릭까지 정상 작동
-- [ ] 6번째 광고 클릭 시 HTTP 429 에러 반환
-- [ ] 에러 메시지: "일일 제출 한도(5회)를 초과했습니다"
-
-### 주요 테스트 스크립트들
-
-#### 시스템 통합 테스트
-```bash
-# 전체 API 통합 테스트
-python test_api.py
-
-# 최종 통합 테스트 (사용자 등록 → 로그인 → 수익 테스트)
-python test_final.py
-
-# 모든 서비스 헬스체크
-python test_health_all.py
-```
-
-#### 특화 테스트
-```bash
-# 대시보드 데이터 검증 (README에서 언급됨)
-python test_dashboard_data.py
-
-# 품질 서비스 base_limit 계산 테스트
-python test_base_limit.py
-
-# 비밀번호 해시 검증 테스트
-python test_password.py
-```
-
-### Advertiser Service 테스트
-```bash
-# Advertiser Service 디렉토리로 이동
-cd services/advertiser-service
-
-# 가상환경 활성화
-.\venv\Scripts\Activate.ps1  # Windows
-# source venv/bin/activate    # Linux/Mac
-
-# 환경변수 설정
-$env:JWT_SECRET_KEY="your-super-secret-jwt-key-change-in-production-must-be-32-chars-minimum"
-$env:DATABASE_URL="postgresql+asyncpg://admin:your_secure_password_123@localhost:5433/search_exchange_db"
-
-# 서비스 실행
+# Backend 서비스 (예: analysis-service)
+cd services/analysis-service
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate   # Windows
+pip install -r requirements.txt
 python main.py
-
-# API 테스트
-curl http://localhost:8007/health
-curl http://localhost:8007/business-categories
 ```
 
-### 수동 테스트 시나리오
+---
 
-#### 기본 사용자 플로우
-1. **로그인**: 사용자 계정으로 로그인
-2. **검색**: 메인 페이지에서 검색어 입력 및 제출
-3. **대시보드 확인**: 대시보드에서 다음 항목들이 실시간 업데이트되는지 확인:
-   - Quality History 차트
-   - Daily Submission Limit
-   - Total Searches 카운트
-   - Success Rate 퍼센트
-   - Avg Quality Score
-4. **입찰 선택**: 경매에서 입찰 선택 후 거래 내역 확인
-5. **실시간 갱신**: 30초 후 자동 데이터 갱신 확인
+## 📋 체크리스트
 
-#### 관리자 시스템 테스트
-1. **관리자 로그인**: `/admin/login`에서 관리자 계정으로 로그인
-2. **광고주 심사**: `/admin/advertiser-review`에서 대기 중인 광고주 조회
-3. **심사 처리**: 광고주 승인/거절 및 메모 작성
-4. **데이터 수정**: 광고주 키워드 및 카테고리 수정 테스트
+### 배포 전 확인사항
 
-#### 클릭 추적 시스템 테스트
-1. **검색 후 클릭**: 검색 결과에서 광고 클릭
-2. **API 호출 확인**: `/api/track-click` API 정상 호출 확인
-3. **보상 지급**: `/api/user/earnings`를 통한 보상 지급 확인
-4. **사용량 업데이트**: 대시보드에서 Today's Usage 증가 확인
+- [ ] 모든 서비스 헬스체크 통과
+- [ ] 데이터베이스 마이그레이션 완료
+- [ ] **환경 변수 설정 (JWT_SECRET_KEY, GEMINI_API_KEY)** ⭐ 필수
+- [ ] Gemini API 연결 테스트 성공
+- [ ] AI 분석 타임아웃 10초 설정
+- [ ] 로딩 UI 정상 표시
+- [ ] SLA 2단계 평가 정상 작동
+- [ ] 광고주 키워드 매칭 확인
+- [ ] 일일 제출 한도 정상 작동
 
-### Advertiser Service 테스트 시나리오
-1. **서비스 실행**: Advertiser Service가 포트 8007에서 정상 실행되는지 확인
-2. **Health Check**: `GET /health` 엔드포인트로 서비스 상태 확인
-3. **비즈니스 카테고리**: `GET /business-categories`로 카테고리 목록 조회
-4. **광고주 회원가입**: `POST /register`로 새 광고주 등록
-5. **로그인**: `POST /login`으로 JWT 토큰 발급
-6. **대시보드**: `GET /dashboard`로 광고주 대시보드 데이터 확인
-7. **자동입찰 최적화**: `POST /auto-bid/optimize`로 입찰가 최적화 테스트
-8. **API 문서**: `http://localhost:8007/docs`로 Swagger UI 확인
+### 테스트 체크리스트
 
-## 🚨 문제 해결 가이드
+- [ ] 회원가입/로그인 (사용자, 광고주, 관리자)
+- [ ] **AI 품질 평가 (Gemini)** ⭐
+- [ ] **AI 웹사이트 분석 (광고주)** ⭐
+- [ ] 역경매 및 입찰
+- [ ] 광고 클릭 → 1차 평가 → PENDING_RETURN
+- [ ] 광고주 사이트 탐색 → 복귀 → 2차 평가 → PASSED
+- [ ] 정산 완료 (Settlement Service)
+- [ ] 대시보드 실시간 업데이트
 
-### 자주 발생하는 문제들
+---
 
-#### 1. 데이터베이스 연결 오류
-```bash
-# Docker 컨테이너 상태 확인
-docker ps | grep postgres-db
+## 🎯 향후 개선 방향
 
-# 데이터베이스 재시작
-docker-compose restart postgres-db
+### 단기 (1개월)
+- [ ] AI 분석 캐싱 (반복 검색어 즉시 응답)
+- [ ] Gemini 2.0 Flash Lite 테스트 (더 빠른 응답)
+- [ ] 복귀 시 축하 모달 표시
+- [ ] 대기 중인 정산 목록 표시
 
-# 연결 테스트
-docker exec -it postgres-db psql -U postgres -d postgres -c "SELECT 1;"
-```
+### 중기 (3개월)
+- [ ] ML 기반 봇 감지
+- [ ] WebSocket 실시간 알림
+- [ ] 광고주 성과 리포트 강화
+- [ ] 모바일 반응형 개선
 
-#### 2. Daily 사용량 불일치 문제
-```bash
-# 보정 마이그레이션 실행
-cd database
-./run_correction_migration.sh  # Linux/Mac
-run_correction_migration.bat   # Windows
-```
+### 장기 (6개월)
+- [ ] 광고주 Postback URL 연동
+- [ ] 실제 전환(구매) 추적
+- [ ] 블록체인 정산 투명성
+- [ ] 다국어 AI 분석 지원
 
-#### 3. 서비스 간 연결 문제
-```bash
-# 모든 서비스 상태 확인
-docker-compose ps
-
-# 서비스 로그 확인
-docker-compose logs -f user-service
-docker-compose logs -f advertiser-service
-
-# 환경 변수 확인
-cat .env | grep SERVICE_URL
-```
-
-#### 4. 마이그레이션 실행 오류
-```bash
-# Docker 상태 확인 후 마이그레이션 재실행
-docker-compose up -d
-cd database
-./run_migration.sh
-```
-
-### 성능 최적화 팁
-
-#### 데이터베이스 최적화
-- 정기적인 `VACUUM` 및 `ANALYZE` 실행
-- 인덱스 사용률 모니터링
-- 쿼리 성능 분석
-
-#### 애플리케이션 최적화
-- React Query 캐시 설정 조정
-- 이미지 최적화 및 압축
-- 번들 크기 최적화
-
-## 📚 추가 문서
-
-- **`VERIFICATION_CHECKLIST.md`**: Daily 사용량 통일 검증 상세 가이드
-- **`SECURITY_UPGRADE_REPORT.md`**: 보안 강화 보고서
-- **`PYTHON_SETUP_README.md`**: Python 마이크로서비스 설정 가이드
+---
 
 ## 🤝 기여하기
 
 1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+2. Create Feature Branch (`git checkout -b feature/NewFeature`)
+3. Commit Changes (`git commit -m 'Add NewFeature'`)
+4. Push to Branch (`git push origin feature/NewFeature`)
+5. Open Pull Request
+
+---
 
 ## 📄 라이선스
 
-이 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 `LICENSE` 파일을 참조하세요.
+MIT License
 
 ## 📞 연락처
 
-프로젝트 링크: [https://github.com/action5861/gatekeeper](https://github.com/action5861/gatekeeper)
+GitHub: [https://github.com/action5861/gatekeeper](https://github.com/action5861/gatekeeper)
+
+---
+
+**Last Updated**: 2025-10-19  
+**Major Changes**: 
+- ⭐ Gemini AI 완전 통합 (검색어 + 웹사이트 분석)
+- ⭐ AI 분석 타임아웃 최적화 (10초) + 로딩 UI 개선
+- ⭐ 모델 업데이트 (models/gemini-flash-latest)
+- 2단계 하이브리드 SLA 평가 모델 (광고주 사이트 체류 시간 정확 측정)

@@ -61,7 +61,7 @@ def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
     """일일 제출 한도를 기본값 5개로 설정합니다."""
     # 모든 사용자에게 동일하게 하루 5번 제출 한도 제공
     # 추후 quality_score에 따라 동적으로 변경 가능
-    result = SubmissionLimit(level="Standard", dailyMax=5)
+    result = SubmissionLimit(level="Average", dailyMax=5)
     print(f"🔍 디버그: 고정 일일 제출 한도 설정, dailyMax={result.dailyMax}")
     return result
 
