@@ -354,26 +354,25 @@ async def verify_delivery_and_trigger_settlement(payload: DeliveryMetricsPayload
             decision = "FAILED"
             print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
             print(f"   부정 클릭 의심 (v_atf: {payload.v_atf} < 0.3)")
-        # 광고주 사이트 체류 시간으로 평가
-        elif payload.t_dwell_on_ad_site >= 10.0:
+        # 광고주 사이트 체류 시간으로 평가 (선형 보상 시스템)
+        elif payload.t_dwell_on_ad_site >= 20.0:
             decision = "PASSED"
             print(f"✅ SLA PASSED for trade_id: {payload.trade_id}")
             print(
-                f"   광고 클릭 + 광고주 사이트 10초 이상 체류 ({payload.t_dwell_on_ad_site:.2f}s)"
+                f"   광고 클릭 + 광고주 사이트 20초 이상 체류 ({payload.t_dwell_on_ad_site:.2f}s)"
             )
-        elif payload.t_dwell_on_ad_site >= 5.0:
+        elif payload.t_dwell_on_ad_site > 3.0:
             decision = "PARTIAL"
             print(f"⚠️ SLA PARTIAL for trade_id: {payload.trade_id}")
             print(
-                f"   광고 클릭 + 광고주 사이트 5초 이상 체류 ({payload.t_dwell_on_ad_site:.2f}s)"
+                f"   광고 클릭 + 광고주 사이트 3초 초과 체류 ({payload.t_dwell_on_ad_site:.2f}s, 3s < dwell < 20s)"
             )
         else:
-            # 클릭했지만 광고주 사이트 체류 시간이 짧음 (아직 측정 전이거나 바로 이탈)
-            # 일단 PARTIAL로 (나중에 체류 시간 업데이트되면 재평가)
-            decision = "PARTIAL"
-            print(f"⚠️ SLA PARTIAL for trade_id: {payload.trade_id}")
+            # 클릭했지만 광고주 사이트 체류 시간이 3초 이하 = FAILED
+            decision = "FAILED"
+            print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
             print(
-                f"   광고 클릭 O, 광고주 사이트 체류 시간 짧음 ({payload.t_dwell_on_ad_site:.2f}s)"
+                f"   광고 클릭 O, 하지만 체류 시간 부족 ({payload.t_dwell_on_ad_site:.2f}s <= 3s)"
             )
 
         # 3. Settlement Service에 판정 결과 전달
@@ -390,6 +389,7 @@ async def verify_delivery_and_trigger_settlement(payload: DeliveryMetricsPayload
                 json={
                     "trade_id": payload.trade_id,
                     "verification_decision": decision,
+                    "dwell_time": payload.t_dwell_on_ad_site,  # 직접 전달
                     "metrics": payload.dict(),
                 },
             )
@@ -473,18 +473,22 @@ async def verify_return(request: dict):
             values={"trade_id": trade_id, "dwell_time": dwell_time},
         )
 
-        # SLA 기준에 따라 판정
+        # SLA 기준에 따라 판정 (선형 보상 시스템)
         decision = "FAILED"
 
-        if dwell_time >= 10.0:
+        if dwell_time >= 20.0:
             decision = "PASSED"
-            print(f"✅ [2nd Evaluation] PASSED - Dwell time >= 10s")
-        elif dwell_time >= 5.0:
+            print(f"✅ [2nd Evaluation] PASSED - Dwell time >= 20s")
+        elif dwell_time > 3.0:
             decision = "PARTIAL"
-            print(f"⚠️ [2nd Evaluation] PARTIAL - Dwell time >= 5s")
+            print(
+                f"⚠️ [2nd Evaluation] PARTIAL - Dwell time: {dwell_time:.2f}s (3s < dwell < 20s)"
+            )
         else:
-            decision = "PARTIAL"  # 클릭했으니 일단 부분 정산
-            print(f"⚠️ [2nd Evaluation] PARTIAL - Short dwell time")
+            decision = "FAILED"  # 3초 이하는 보상 없음
+            print(
+                f"❌ [2nd Evaluation] FAILED - Dwell time too short: {dwell_time:.2f}s (<= 3s)"
+            )
 
         # transactions 테이블 상태 업데이트
         await database.execute(
@@ -509,6 +513,11 @@ async def verify_return(request: dict):
                     "trade_id": trade_id,
                     "verification_decision": decision,
                     "dwell_time": dwell_time,
+                    "metrics": {
+                        "t_dwell": dwell_time,
+                        "t_dwell_on_ad_site": dwell_time,
+                        "dwell_time": dwell_time,  # 추가 필드명
+                    },
                 },
             )
 

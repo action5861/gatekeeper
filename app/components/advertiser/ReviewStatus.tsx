@@ -151,6 +151,24 @@ export default function ReviewStatus({ onStatusChange }: ReviewStatusProps) {
         return null
     }
 
+    // 승인된 경우 컴팩트 버전으로 표시
+    if (reviewData.review_status === 'approved') {
+        return (
+            <div className="bg-green-500/10 border border-green-500/20 rounded-lg px-4 py-3">
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                        <CheckCircle className="w-4 h-4 text-green-400 flex-shrink-0" />
+                        <span className="text-green-400 font-medium text-sm">심사 승인됨</span>
+                        <span className="text-slate-400 text-xs">
+                            {new Date(reviewData.created_at).toLocaleDateString('ko-KR')} 등록
+                        </span>
+                    </div>
+                    <p className="text-green-300 text-sm">광고 등록이 가능합니다</p>
+                </div>
+            </div>
+        )
+    }
+
     return (
         <div className={`rounded-xl p-6 border ${getStatusColor(reviewData.review_status)}`}>
             {/* Header */}
@@ -261,16 +279,6 @@ export default function ReviewStatus({ onStatusChange }: ReviewStatusProps) {
                             <span>추가 정보 제출</span>
                         </button>
                     </div>
-                </div>
-            )}
-
-            {reviewData.review_status === 'approved' && (
-                <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-4">
-                    <div className="flex items-center space-x-2 mb-2">
-                        <CheckCircle className="w-5 h-5 text-green-400" />
-                        <span className="text-green-400 font-medium">심사 승인</span>
-                    </div>
-                    <p className="text-green-300">축하합니다! 심사가 승인되었습니다. 이제 광고 등록이 가능합니다.</p>
                 </div>
             )}
 

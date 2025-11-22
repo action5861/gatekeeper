@@ -1,13 +1,10 @@
-// 품질 지수 변화 추이 차트
-
+// [LIVE]
 'use client'
 
-import { ErrorFallback } from '@/components/ui/ErrorFallback';
-import { QualityHistorySkeleton } from '@/components/ui/Skeleton';
-import { useQualityData } from '@/lib/hooks/useDashboardData';
-import { logComponentError } from '@/lib/utils/errorMonitor';
 import { BarChart3, Target, TrendingUp } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+
+type Point = { date: string; avg: number; count: number }
 
 interface QualityHistoryData {
   name: string;
@@ -25,37 +22,11 @@ interface QualityStats {
   recentScore: number;
 }
 
-export default function QualityHistory() {
-  const { qualityHistory, qualityStats, isLoading, error, refetch } = useQualityData();
-
-  // 에러 처리
-  if (error) {
-    logComponentError(
-      error instanceof Error ? error : new Error(error.toString()),
-      'QualityHistory',
-      undefined,
-      { qualityHistory, qualityStats }
-    );
-  }
-
-  // 로딩 상태
-  if (isLoading) {
-    return <QualityHistorySkeleton />;
-  }
-
-  // 에러 상태
-  if (error) {
-    return (
-      <ErrorFallback
-        error={error}
-        componentName="Quality History"
-        onRetry={refetch}
-      />
-    );
-  }
+export default function QualityHistory({ series = [] as Point[] }) {
+  // 차트/리스트에 series 사용 (하드코딩 제거)
 
   // 데이터가 없는 경우
-  if (!qualityHistory || qualityHistory.length === 0) {
+  if (!series || series.length === 0) {
     return (
       <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
         <h3 className="text-2xl font-semibold mb-6 text-slate-100 flex items-center space-x-2">
@@ -73,15 +44,19 @@ export default function QualityHistory() {
     )
   }
 
-  // 차트 데이터 준비 (역순으로 정렬하여 최신이 오른쪽에 오도록)
-  const chartData = qualityHistory
-    .slice()
-    .reverse()
-    .map((item, index) => ({
-      week: item.name,
-      score: item.score,
-      target: 70
-    }))
+  // 차트 데이터 준비
+  const chartData = series.map((item, index) => ({
+    week: item.date,
+    score: item.avg,
+    target: 70
+  }))
+
+  // 통계 계산
+  const scores = series.map(item => item.avg)
+  const average = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0
+  const max = Math.max(...scores)
+  const min = Math.min(...scores)
+  const recentScore = scores[scores.length - 1] || 0
 
   return (
     <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700">
@@ -91,28 +66,24 @@ export default function QualityHistory() {
       </h3>
 
       {/* Summary Stats */}
-      {qualityStats && (
-        <div className="grid grid-cols-2 gap-4 mb-6">
-          <div className="text-center">
-            <p className="text-2xl font-bold text-blue-400">{qualityStats.average}</p>
-            <p className="text-sm text-slate-400">평균 점수</p>
-          </div>
-          <div className="text-center">
-            <p className="text-2xl font-bold text-green-400">{qualityStats.max}</p>
-            <p className="text-sm text-slate-400">최고 점수</p>
-          </div>
-          <div className="text-center">
-            <p className="text-2xl font-bold text-yellow-400">{qualityStats.recentScore}</p>
-            <p className="text-sm text-slate-400">최근 점수</p>
-          </div>
-          <div className="text-center">
-            <p className={`text-2xl font-bold ${qualityStats.growth.isPositive ? 'text-green-400' : 'text-red-400'}`}>
-              {qualityStats.growth.percentage}
-            </p>
-            <p className="text-sm text-slate-400">성장률</p>
-          </div>
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div className="text-center">
+          <p className="text-2xl font-bold text-blue-400">{average.toFixed(1)}</p>
+          <p className="text-sm text-slate-400">평균 점수</p>
         </div>
-      )}
+        <div className="text-center">
+          <p className="text-2xl font-bold text-green-400">{max.toFixed(1)}</p>
+          <p className="text-sm text-slate-400">최고 점수</p>
+        </div>
+        <div className="text-center">
+          <p className="text-2xl font-bold text-yellow-400">{recentScore.toFixed(1)}</p>
+          <p className="text-sm text-slate-400">최근 점수</p>
+        </div>
+        <div className="text-center">
+          <p className="text-2xl font-bold text-green-400">N/A</p>
+          <p className="text-sm text-slate-400">성장률</p>
+        </div>
+      </div>
 
       {/* Chart */}
       <div className="h-64 mb-6">
@@ -184,34 +155,28 @@ export default function QualityHistory() {
       </div>
 
       {/* Insights */}
-      {qualityStats && (
-        <div className="mt-6 pt-6 border-t border-slate-600">
-          <h4 className="text-lg font-semibold text-slate-100 mb-4 flex items-center space-x-2">
-            <Target className="w-5 h-5 text-yellow-400" />
-            <span>Insights</span>
-          </h4>
-          <div className="space-y-2 text-sm">
+      <div className="mt-6 pt-6 border-t border-slate-600">
+        <h4 className="text-lg font-semibold text-slate-100 mb-4 flex items-center space-x-2">
+          <Target className="w-5 h-5 text-yellow-400" />
+          <span>Insights</span>
+        </h4>
+        <div className="space-y-2 text-sm">
+          <p className="text-slate-300">
+            • 평균 품질 점수: <span className="text-blue-400 font-semibold">{average.toFixed(1)}점</span>
+          </p>
+          <p className="text-slate-300">
+            • 최고 기록: <span className="text-green-400 font-semibold">{max.toFixed(1)}점</span>
+          </p>
+          <p className="text-slate-300">
+            • 최근 점수: <span className="text-yellow-400 font-semibold">{recentScore.toFixed(1)}점</span>
+          </p>
+          {recentScore >= 70 && (
             <p className="text-slate-300">
-              • 평균 품질 점수: <span className="text-blue-400 font-semibold">{qualityStats.average}점</span>
+              • 목표 점수(70점)를 달성하고 있습니다
             </p>
-            <p className="text-slate-300">
-              • 최고 기록: <span className="text-green-400 font-semibold">{qualityStats.max}점</span>
-            </p>
-            {qualityStats.growth.percentage !== "N/A" && (
-              <p className="text-slate-300">
-                • 성장률: <span className={`font-semibold ${qualityStats.growth.isPositive ? 'text-green-400' : 'text-red-400'}`}>
-                  {qualityStats.growth.percentage}
-                </span>
-              </p>
-            )}
-            {qualityStats.recentScore >= 70 && (
-              <p className="text-slate-300">
-                • 목표 점수(70점)를 달성하고 있습니다
-              </p>
-            )}
-          </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   )
 } 

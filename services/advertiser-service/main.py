@@ -4,13 +4,13 @@ import re
 import random
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Literal
+from typing import Any, Dict, List, Tuple, Optional, Literal, Annotated
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr, validator, Field
+from pydantic import BaseModel, EmailStr, validator, Field, ConfigDict
 import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -38,6 +38,16 @@ from auto_bid_optimizer import (
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("advertiser-service")
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+SAFE_DB_REFERENCE = None
+if DATABASE_URL:
+    parsed_db = urlparse(DATABASE_URL)
+    host = parsed_db.hostname or "unknown-host"
+    port = f":{parsed_db.port}" if parsed_db.port else ""
+    db_name = parsed_db.path.lstrip("/") or "unknown-db"
+    SAFE_DB_REFERENCE = f"{parsed_db.scheme}://{host}{port}/{db_name}"
+    logger.info("Advertiser service database target: %s", SAFE_DB_REFERENCE)
 
 app = FastAPI(title="Advertiser Service", version="1.1.0")
 
@@ -374,6 +384,56 @@ class BusinessSetupData(BaseModel):
             if not isinstance(cid, int) or cid < 1:
                 raise ValueError("올바른 카테고리 ID가 아닙니다")
         return v
+
+
+class AutoBidSettingsUpdate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    daily_budget: Annotated[
+        float,
+        Field(gt=0, alias="dailyBudget", description="일일 예산(양수)"),
+    ]
+    max_bid_per_keyword: Annotated[
+        int,
+        Field(
+            ge=0, alias="maxBidPerKeyword", description="키워드당 최대 입찰가(0 이상)"
+        ),
+    ]
+    min_quality_score: Annotated[
+        int,
+        Field(
+            ge=0,
+            le=100,
+            alias="minQualityScore",
+            description="최소 품질 점수(0~100)",
+        ),
+    ]
+    is_enabled: bool = Field(
+        True, alias="isEnabled", description="자동 입찰 활성화 여부"
+    )
+    excluded_keywords: Optional[List[str]] = Field(
+        default=None,
+        alias="excludedKeywords",
+        description="제외 키워드 목록",
+    )
+
+    @validator("excluded_keywords", pre=True, always=True)
+    def ensure_list(cls, value: Optional[Any]) -> List[str]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        if isinstance(value, list):
+            cleaned_list: List[str] = []
+            for item in value:
+                if item is None:
+                    continue
+                cleaned = str(item).strip()
+                if cleaned:
+                    cleaned_list.append(cleaned)
+            return cleaned_list
+        raise ValueError("excluded_keywords must be a list of strings")
 
 
 class AdvertiserRegister(BaseModel):
@@ -1260,17 +1320,28 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
         logger.info(f"Processed advertiser_data: {advertiser_data}")
 
         if review_status == "approved":
-            # 1) 입찰 요약
+            # 1) 입찰 요약 (정산 금액 기준)
             bid_summary = await database.fetch_one(
                 """
                 SELECT 
-                    COUNT(*) as total_bids,
-                    COUNT(CASE WHEN bid_result = 'won' THEN 1 END) as successful_bids,
-                    COALESCE(SUM(bid_amount),0) as total_spent,
-                    COALESCE(AVG(bid_amount),0) as avg_bid_amount
-                FROM auto_bid_logs 
-                WHERE advertiser_id = :id
-                  AND created_at >= CURRENT_DATE - INTERVAL '30 days'
+                    COUNT(DISTINCT abl.id) as total_bids,
+                    COUNT(DISTINCT CASE WHEN abl.bid_result = 'won' OR s.verification_decision IS NOT NULL THEN abl.id END) as successful_bids,
+                    COALESCE(SUM(COALESCE(s.payable_amount, 0)), 0) as total_spent,
+                    COALESCE(AVG(abl.bid_amount), 0) as avg_bid_amount
+                FROM auto_bid_logs abl
+                LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
+                    AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
+                    AND ABS(b.price - abl.bid_amount) < 10
+                LEFT JOIN LATERAL (
+                    SELECT t.id, t.bid_id
+                    FROM transactions t
+                    WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
+                    ORDER BY t.created_at DESC
+                    LIMIT 1
+                ) t ON TRUE
+                LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                WHERE abl.advertiser_id = :id
+                  AND abl.created_at >= CURRENT_DATE - INTERVAL '30 days'
                 """,
                 {"id": advertiser_id},
             )
@@ -1291,16 +1362,29 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
             )
             today_spent_row = await database.fetch_one(
                 """
-                SELECT COALESCE(SUM(bid_amount),0) as today_spent
-                FROM auto_bid_logs
-                WHERE advertiser_id = :id
-                  AND DATE(created_at) = CURRENT_DATE
+                SELECT COALESCE(SUM(COALESCE(s.payable_amount, 0)), 0) as today_spent
+                FROM auto_bid_logs abl
+                LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
+                    AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
+                    AND ABS(b.price - abl.bid_amount) < 10
+                LEFT JOIN LATERAL (
+                    SELECT t.id, t.bid_id
+                    FROM transactions t
+                    WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
+                    ORDER BY t.created_at DESC
+                    LIMIT 1
+                ) t ON TRUE
+                LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                WHERE abl.advertiser_id = :id
+                  AND DATE(abl.created_at) = CURRENT_DATE
                 """,
                 {"id": advertiser_id},
             )
             daily_budget = float(
                 auto_bid_settings["daily_budget"] if auto_bid_settings else 10000
             )
+            if auto_bid_settings:
+                advertiser_data["daily_budget"] = daily_budget
             # Record 타입을 dict로 변환하여 .get() 메서드 사용
             today_spent_dict = dict(today_spent_row) if today_spent_row else {}
             today_spent = int(today_spent_dict.get("today_spent") or 0)
@@ -1308,31 +1392,162 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
                 (today_spent / daily_budget * 100) if daily_budget > 0 else 0
             )
 
-            # 3) 최근 입찰
+            # 3) 최근 입찰 (정산 정보 포함)
+            # auto_bid_logs를 기준으로 하되, transactions를 통해 정산 정보 연결
+            # 최신순으로 정렬하고 중복 제거
             recent_bids_rows = await database.fetch_all(
                 """
-                SELECT id, search_query, bid_amount as amount, created_at as timestamp,
-                       bid_result as status, match_score, quality_score
-                FROM auto_bid_logs
-                WHERE advertiser_id = :id
-                ORDER BY created_at DESC
+                WITH ranked_bids AS (
+                    SELECT 
+                        abl.id,
+                        abl.search_query,
+                        abl.bid_amount as amount,
+                        abl.created_at as timestamp,
+                        abl.bid_result as status,
+                        b.id as bid_id,
+                        COALESCE(s.verification_decision, NULL) as settlement_decision,
+                        COALESCE(s.payable_amount, NULL) as settled_amount,
+                        COALESCE(dm.v_atf, NULL) as v_atf,
+                        COALESCE(dm.clicked, FALSE) as clicked,
+                        COALESCE(dm.t_dwell_on_ad_site, 0.0) as t_dwell_on_ad_site,
+                        t.id as transaction_id,
+                        t.user_id,
+                        t.primary_reward,
+                        ROW_NUMBER() OVER (PARTITION BY abl.id ORDER BY abl.created_at DESC) as rn
+                    FROM auto_bid_logs abl
+                    LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
+                        AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
+                        AND ABS(b.price - abl.bid_amount) < 10
+                    LEFT JOIN LATERAL (
+                        SELECT t.id, t.user_id, t.bid_id, t.primary_reward
+                        FROM transactions t
+                        WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
+                        ORDER BY t.created_at DESC
+                        LIMIT 1
+                    ) t ON TRUE
+                    LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
+                    LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                    WHERE abl.advertiser_id = :id
+                )
+                SELECT 
+                    id, search_query, amount, timestamp, status, bid_id,
+                    settlement_decision, settled_amount, v_atf, clicked,
+                    t_dwell_on_ad_site, transaction_id, user_id, primary_reward
+                FROM ranked_bids
+                WHERE rn = 1
+                ORDER BY timestamp DESC
                 LIMIT 10
                 """,
                 {"id": advertiser_id},
             )
             recent_bids = []
             for bid in recent_bids_rows:
+                settlement_info = None
+                # 정산 정보 기본값 설정
+                v_atf = float(bid["v_atf"]) if bid["v_atf"] else 0.0
+                clicked = bool(bid["clicked"])
+                t_dwell_on_ad_site = (
+                    float(bid["t_dwell_on_ad_site"])
+                    if bid["t_dwell_on_ad_site"]
+                    else 0.0
+                )
+                primary_reward = (
+                    float(bid["primary_reward"])
+                    if bid["primary_reward"]
+                    else float(bid["amount"])  # primary_reward가 없으면 입찰 금액 사용
+                )
+                
+                # 정산 영수증 API와 동일한 재계산 로직 적용
+                # delivery_metrics의 실제 데이터를 기반으로 판정을 재계산
+                recalculated_decision = None
+                if clicked and v_atf >= 0.3:
+                    if t_dwell_on_ad_site >= 20.0:
+                        recalculated_decision = "PASSED"
+                    elif t_dwell_on_ad_site > 3.0:
+                        recalculated_decision = "PARTIAL"
+                    else:
+                        recalculated_decision = "FAILED"
+                else:
+                    recalculated_decision = "FAILED"
+                
+                # settlements 테이블의 decision이 있으면 우선 사용, 없으면 재계산된 값 사용
+                final_decision = (
+                    bid["settlement_decision"]
+                    if bid["settlement_decision"]
+                    else recalculated_decision
+                )
+                
+                # 재계산된 판정이 더 정확하면 그것을 사용 (settlements의 decision이 없거나, 재계산 결과가 다르면)
+                if not bid["settlement_decision"] or (
+                    recalculated_decision
+                    and recalculated_decision != bid["settlement_decision"]
+                ):
+                    final_decision = recalculated_decision
+                
+                # 정산 정보가 있는 경우 (decision이 있거나 delivery_metrics가 있는 경우)
+                if final_decision or (v_atf > 0 or clicked or t_dwell_on_ad_site > 0):
+                    # 정산 금액 재계산
+                    recalculated_amount = 0.0
+                    if final_decision == "PASSED":
+                        # 전액 지급
+                        recalculated_amount = primary_reward
+                    elif final_decision == "PARTIAL":
+                        # 선형 보상 계산: 3초 = 25%, 20초 = 100%로 선형 보간
+                        if t_dwell_on_ad_site <= 3.0:
+                            ratio = 0.0
+                        elif t_dwell_on_ad_site >= 20.0:
+                            ratio = 1.0
+                        else:
+                            # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
+                            ratio = 0.25 + 0.75 * (t_dwell_on_ad_site - 3.0) / (20.0 - 3.0)
+                            ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
+                        recalculated_amount = primary_reward * ratio
+                    else:  # FAILED
+                        recalculated_amount = 0.0
+                    
+                    # settlements 테이블의 금액이 있고 판정이 같으면 그것을 사용, 아니면 재계산된 금액 사용
+                    final_amount = (
+                        float(bid["settled_amount"])
+                        if bid["settled_amount"]
+                        and bid["settlement_decision"] == final_decision
+                        else recalculated_amount
+                    )
+                    
+                    settlement_info = {
+                        "decision": final_decision or "FAILED",
+                        "settled_amount": final_amount,
+                        "v_atf": v_atf,
+                        "clicked": clicked,
+                        "t_dwell_on_ad_site": t_dwell_on_ad_site,
+                        "trade_id": bid["bid_id"] or str(bid["id"]),
+                        "transaction_id": bid["transaction_id"],
+                    }
+
+                # 정산 정보가 있으면 상태를 "won"으로 설정
+                bid_status = bid["status"].lower() if bid["status"] else "lost"
+                if settlement_info and bid_status != "won":
+                    bid_status = "won"
+
+                # 정산 금액이 있으면 정산 금액을 사용, 없으면 입찰 금액 사용
+                display_amount = (
+                    settlement_info["settled_amount"]
+                    if settlement_info and settlement_info.get("settled_amount", 0) > 0
+                    else bid["amount"]
+                )
+
                 recent_bids.append(
                     {
-                        "id": bid["id"],
-                        "auctionId": bid["search_query"],
-                        "amount": bid["amount"],
+                        "id": str(bid["id"]),
+                        "bidId": bid["bid_id"],
+                        "auctionId": bid["search_query"] or "N/A",
+                        "amount": display_amount,  # 정산 금액 또는 입찰 금액
                         "timestamp": (
                             bid["timestamp"].isoformat() if bid["timestamp"] else ""
                         ),
-                        "status": bid["status"],
-                        "highestBid": bid["amount"],  # TODO: 실제 최고가 연동
-                        "myBid": bid["amount"],
+                        "status": bid_status,
+                        "highestBid": bid["amount"],  # 입찰 금액 유지
+                        "myBid": bid["amount"],  # 입찰 금액 유지
+                        "settlement": settlement_info,
                     }
                 )
 
@@ -1439,6 +1654,7 @@ async def health_check():
         "status": "healthy" if db_ok else "degraded",
         "service": "advertiser-service",
         "database": "connected" if db_ok else "disconnected",
+        "database_url": SAFE_DB_REFERENCE,
     }
 
 
@@ -1569,7 +1785,7 @@ async def get_auto_bid_settings(advertiser_id: int):
                 },
             )
             return default_settings
-        return settings
+        return dict(settings)
     except HTTPException:
         raise
     except Exception as e:
@@ -1582,35 +1798,70 @@ async def get_auto_bid_settings(advertiser_id: int):
 @app.put("/auto-bid-settings/{advertiser_id}")
 async def update_auto_bid_settings(
     advertiser_id: int,
-    is_enabled: bool,
-    daily_budget: float,
-    max_bid_per_keyword: int,
-    min_quality_score: int,
-    excluded_keywords: Optional[List[str]] = None,
+    payload: AutoBidSettingsUpdate,
 ):
     try:
-        excluded_keywords = excluded_keywords or []
+        excluded_keywords = payload.excluded_keywords or []
+        daily_budget = float(payload.daily_budget)
+        max_bid_per_keyword = int(payload.max_bid_per_keyword)
+        min_quality_score = int(payload.min_quality_score)
+        is_enabled = bool(payload.is_enabled)
+
         await database.execute(
             """
-            UPDATE auto_bid_settings
-            SET is_enabled = :en,
-                daily_budget = :db,
-                max_bid_per_keyword = :maxb,
-                min_quality_score = :minq,
-                excluded_keywords = :exk,
+            INSERT INTO auto_bid_settings (
+                advertiser_id,
+                daily_budget,
+                max_bid_per_keyword,
+                min_quality_score,
+                is_enabled,
+                excluded_keywords,
+                created_at,
+                updated_at
+            )
+            VALUES (:id, :db, :maxb, :minq, :en, :exk, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (advertiser_id) DO UPDATE
+            SET daily_budget = EXCLUDED.daily_budget,
+                max_bid_per_keyword = EXCLUDED.max_bid_per_keyword,
+                min_quality_score = EXCLUDED.min_quality_score,
+                is_enabled = EXCLUDED.is_enabled,
+                excluded_keywords = EXCLUDED.excluded_keywords,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE advertiser_id = :id
             """,
             {
                 "id": advertiser_id,
-                "en": is_enabled,
                 "db": daily_budget,
                 "maxb": max_bid_per_keyword,
                 "minq": min_quality_score,
+                "en": is_enabled,
                 "exk": excluded_keywords,
             },
         )
-        return {"success": True, "message": "자동 입찰 설정이 업데이트되었습니다"}
+
+        updated = await database.fetch_one(
+            """
+            SELECT advertiser_id, is_enabled, daily_budget, max_bid_per_keyword,
+                   min_quality_score, excluded_keywords, updated_at
+            FROM auto_bid_settings
+            WHERE advertiser_id = :id
+            """,
+            {"id": advertiser_id},
+        )
+        if not updated:
+            raise HTTPException(
+                status_code=500, detail="업데이트 후 설정을 조회하지 못했습니다"
+            )
+
+        logger.info(
+            "Auto bid settings updated for advertiser_id=%s: budget=%s, max_bid=%s, min_quality=%s, enabled=%s",
+            advertiser_id,
+            daily_budget,
+            max_bid_per_keyword,
+            min_quality_score,
+            is_enabled,
+        )
+
+        return {"success": True, "data": dict(updated)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1640,13 +1891,67 @@ async def get_advertiser_keywords(advertiser_id: int):
 
 
 @app.put("/keywords/{advertiser_id}")
-async def update_advertiser_keywords(advertiser_id: int, keywords: List[dict]):
+async def update_advertiser_keywords(advertiser_id: int, request: Request):
     try:
+        try:
+            raw_payload = await request.json()
+        except Exception as parse_error:
+            logger.exception("Failed to parse keywords payload: %r", parse_error)
+            raise HTTPException(
+                status_code=400, detail="유효한 JSON 형식이 아닙니다."
+            ) from parse_error
+
+        if isinstance(raw_payload, dict):
+            keywords = raw_payload.get("keywords", [])
+        elif isinstance(raw_payload, list):
+            keywords = raw_payload
+        elif raw_payload is None:
+            keywords = []
+        else:
+            raise HTTPException(
+                status_code=400, detail="키워드 데이터 형식이 올바르지 않습니다."
+            )
+
+        normalized_keywords: List[Dict[str, Any]] = []
+        for item in keywords:
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400, detail="각 키워드는 객체 형식이어야 합니다."
+                )
+
+            keyword_text = str(item.get("keyword", "")).strip()
+            if not keyword_text:
+                raise HTTPException(
+                    status_code=400, detail="키워드 텍스트는 필수입니다."
+                )
+
+            try:
+                priority_value = int(item.get("priority", 1))
+            except (TypeError, ValueError) as priority_error:
+                raise HTTPException(
+                    status_code=400, detail="우선순위는 숫자여야 합니다."
+                ) from priority_error
+
+            match_type_value = str(item.get("match_type", "broad")).strip().lower()
+            if match_type_value not in {"broad", "phrase", "exact"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="match_type은 broad, phrase, exact 중 하나여야 합니다.",
+                )
+
+            normalized_keywords.append(
+                {
+                    "keyword": keyword_text,
+                    "priority": max(1, min(priority_value, 5)),
+                    "match_type": match_type_value,
+                }
+            )
+
         await database.execute(
             "DELETE FROM advertiser_keywords WHERE advertiser_id = :id",
             {"id": advertiser_id},
         )
-        for item in keywords:
+        for item in normalized_keywords:
             await database.execute(
                 """
                 INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
@@ -1665,6 +1970,26 @@ async def update_advertiser_keywords(advertiser_id: int, keywords: List[dict]):
     except Exception as e:
         logger.exception("update_advertiser_keywords error: %r", e)
         raise HTTPException(status_code=500, detail=f"키워드 업데이트 실패: {str(e)}")
+
+
+@app.get("/categories/{advertiser_id}")
+async def get_advertiser_categories(advertiser_id: int):
+    """광고주의 카테고리 조회"""
+    try:
+        rows = await database.fetch_all(
+            """
+            SELECT id, category_path, category_level, is_primary, created_at
+            FROM advertiser_categories WHERE advertiser_id = :id
+            ORDER BY is_primary DESC, category_level ASC, category_path ASC
+            """,
+            {"id": advertiser_id},
+        )
+        return rows
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_advertiser_categories error: %r", e)
+        raise HTTPException(status_code=500, detail=f"카테고리 조회 실패: {str(e)}")
 
 
 @app.post("/excluded-keywords/{advertiser_id}")
@@ -1707,49 +2032,300 @@ async def get_bid_history(
 ):
     try:
         time_conditions = {
-            "today": "AND b.created_at >= CURRENT_DATE",
-            "week": "AND b.created_at >= CURRENT_DATE - INTERVAL '7 days'",
-            "month": "AND b.created_at >= CURRENT_DATE - INTERVAL '30 days'",
+            "today": "AND abl.created_at >= CURRENT_DATE",
+            "week": "AND abl.created_at >= CURRENT_DATE - INTERVAL '7 days'",
+            "month": "AND abl.created_at >= CURRENT_DATE - INTERVAL '30 days'",
         }
         time_condition = time_conditions.get(timeRange, time_conditions["week"])
 
-        filter_conditions = {
-            "all": "",
-            "auto": "AND COALESCE(b.is_auto_bid, false) = true",
-            "manual": "AND COALESCE(b.is_auto_bid, false) = false",
-        }
-        filter_condition = filter_conditions.get(filter, "")
+        if filter not in {"all", "auto", "manual"}:
+            logger.warning("Unknown filter '%s' received; defaulting to 'all'", filter)
+            filter = "all"
+        if filter == "manual":
+            logger.info(
+                "Bid history requested with filter=manual but manual bids are not logged; returning empty set"
+            )
+            return []
 
-        result_conditions = {
-            "all": "",
-            "won": "AND b.result = 'won'",
-            "lost": "AND b.result = 'lost'",
-        }
-        result_condition = result_conditions.get(resultFilter, "")
+        result_condition = ""
+        if resultFilter in {"won", "lost"}:
+            result_condition = f"AND abl.bid_result = '{resultFilter}'"
+        elif resultFilter != "all":
+            logger.warning(
+                "Unknown resultFilter '%s' received; defaulting to 'all'", resultFilter
+            )
 
         rows = await database.fetch_all(
             f"""
-            SELECT b.id, b.auction_id, b.buyer_name, b.price as bid_amount,
-                   b.created_at as timestamp, b.result,
-                   a.query_text as search_query,
-                   COALESCE(b.match_score, 0.5) as match_score,
-                   COALESCE(b.quality_score, 50) as quality_score,
-                   COALESCE(b.is_auto_bid, false) as is_auto_bid
-            FROM bids b
-            JOIN auctions a ON b.auction_id = a.id
-            WHERE b.buyer_name = (SELECT company_name FROM advertisers WHERE id = :id)
-            {time_condition} {filter_condition} {result_condition}
-            ORDER BY b.created_at DESC
+            SELECT abl.id,
+                   abl.search_query,
+                   abl.bid_amount,
+                   abl.bid_result,
+                   abl.match_score,
+                   COALESCE(abl.quality_score, 50) AS quality_score,
+                   abl.created_at AS timestamp,
+                   TRUE AS is_auto_bid
+            FROM auto_bid_logs abl
+            WHERE abl.advertiser_id = :id
+              {time_condition} {result_condition}
+            ORDER BY abl.created_at DESC
             LIMIT 100
             """,
             {"id": advertiser_id},
         )
-        return rows
+        history = []
+        for row in rows:
+            timestamp = row["timestamp"]
+            ts_value = (
+                timestamp.isoformat()
+                if hasattr(timestamp, "isoformat")
+                else str(timestamp)
+            )
+            history.append(
+                {
+                    "id": str(row["id"]),
+                    "searchQuery": row["search_query"],
+                    "bidAmount": int(row["bid_amount"]),
+                    "result": row["bid_result"],
+                    "matchScore": float(row["match_score"]),
+                    "qualityScore": (
+                        int(row["quality_score"])
+                        if row["quality_score"] is not None
+                        else 50
+                    ),
+                    "timestamp": ts_value,
+                    "isAutoBid": bool(row["is_auto_bid"]),
+                }
+            )
+        return history
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("get_bid_history error: %r", e)
         raise HTTPException(status_code=500, detail=f"입찰 내역 조회 실패: {str(e)}")
+
+
+@app.get("/settlement-receipt/{bid_id}")
+async def get_settlement_receipt(
+    bid_id: str, current_advertiser: dict = Depends(get_current_advertiser)
+):
+    """
+    개별 입찰에 대한 정산 영수증 조회
+    """
+    try:
+        advertiser_id = current_advertiser["id"]
+
+        # 입찰 정보와 정산 정보 조회
+        # 먼저 bids 테이블에서 조회 시도
+        settlement_data = await database.fetch_one(
+            """
+            SELECT 
+                b.id as bid_id,
+                b.price as bid_amount,
+                b.created_at as bid_timestamp,
+                a.query_text as search_query,
+                t.id as transaction_id,
+                t.user_id,
+                t.primary_reward,
+                COALESCE(s.verification_decision, NULL) as decision,
+                COALESCE(s.payable_amount, NULL) as settled_amount,
+                COALESCE(s.settled_at, NULL) as settled_at,
+                COALESCE(dm.v_atf, NULL) as v_atf,
+                COALESCE(dm.clicked, FALSE) as clicked,
+                COALESCE(dm.t_dwell_on_ad_site, 0.0) as t_dwell_on_ad_site,
+                COALESCE(dm.created_at, NULL) as metrics_created_at
+            FROM bids b
+            LEFT JOIN auctions a ON a.id = b.auction_id
+            LEFT JOIN transactions t ON t.bid_id = b.id
+            LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
+            LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+            WHERE b.id = :bid_id AND b.advertiser_id = :advertiser_id
+            """,
+            {"bid_id": bid_id, "advertiser_id": advertiser_id},
+        )
+
+        # bids에서 찾지 못한 경우 auto_bid_logs에서 조회
+        if not settlement_data:
+            try:
+                auto_bid_log_id = int(bid_id)
+                auto_bid_data = await database.fetch_one(
+                    """
+                    SELECT 
+                        abl.id,
+                        abl.bid_amount,
+                        abl.created_at as bid_timestamp,
+                        abl.search_query,
+                        b.id as actual_bid_id,
+                        t.id as transaction_id,
+                        t.user_id,
+                        t.primary_reward,
+                        COALESCE(s.verification_decision, NULL) as decision,
+                        COALESCE(s.payable_amount, NULL) as settled_amount,
+                        COALESCE(s.settled_at, NULL) as settled_at,
+                        COALESCE(dm.v_atf, NULL) as v_atf,
+                        COALESCE(dm.clicked, FALSE) as clicked,
+                        COALESCE(dm.t_dwell_on_ad_site, 0.0) as t_dwell_on_ad_site,
+                        COALESCE(dm.created_at, NULL) as metrics_created_at
+                    FROM auto_bid_logs abl
+                    LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
+                        AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
+                        AND ABS(b.price - abl.bid_amount) < 10
+                    LEFT JOIN transactions t ON t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query)
+                    LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
+                    LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                    WHERE abl.id = :auto_bid_log_id AND abl.advertiser_id = :advertiser_id
+                    """,
+                    {
+                        "auto_bid_log_id": auto_bid_log_id,
+                        "advertiser_id": advertiser_id,
+                    },
+                )
+                if auto_bid_data:
+                    # Record 타입을 dict로 변환하여 .get() 메서드 사용
+                    auto_bid_dict = dict(auto_bid_data) if auto_bid_data else {}
+                    # auto_bid_logs 결과를 bids 형식으로 변환
+                    settlement_data = {
+                        "bid_id": auto_bid_dict.get("actual_bid_id")
+                        or str(auto_bid_dict.get("id", "")),
+                        "bid_amount": auto_bid_dict.get("bid_amount"),
+                        "bid_timestamp": auto_bid_dict.get("bid_timestamp"),
+                        "search_query": auto_bid_dict.get("search_query"),
+                        "transaction_id": auto_bid_dict.get("transaction_id"),
+                        "user_id": auto_bid_dict.get("user_id"),
+                        "primary_reward": auto_bid_dict.get("primary_reward"),
+                        "decision": auto_bid_dict.get("decision"),
+                        "settled_amount": auto_bid_dict.get("settled_amount"),
+                        "settled_at": auto_bid_dict.get("settled_at"),
+                        "v_atf": auto_bid_dict.get("v_atf"),
+                        "clicked": auto_bid_dict.get("clicked"),
+                        "t_dwell_on_ad_site": auto_bid_dict.get("t_dwell_on_ad_site"),
+                        "metrics_created_at": auto_bid_dict.get("metrics_created_at"),
+                    }
+            except (ValueError, TypeError):
+                pass
+
+        if not settlement_data:
+            raise HTTPException(status_code=404, detail="입찰 정보를 찾을 수 없습니다.")
+
+        # 사용자 정보 익명화
+        user_id = settlement_data["user_id"]
+        anonymized_user_id = f"User_#{hash(str(user_id)) % 10000}" if user_id else None
+
+        result = {
+            "bid_id": settlement_data["bid_id"],
+            "search_query": settlement_data["search_query"] or "N/A",
+            "bid_amount": int(settlement_data["bid_amount"]),
+            "bid_timestamp": (
+                settlement_data["bid_timestamp"].isoformat()
+                if settlement_data["bid_timestamp"]
+                else None
+            ),
+            "transaction_id": settlement_data["transaction_id"],
+            "user_id": anonymized_user_id,
+            "primary_reward": (
+                float(settlement_data["primary_reward"])
+                if settlement_data["primary_reward"]
+                else 0.0
+            ),
+            "settlement": None,
+        }
+
+        # 정산 정보가 있는 경우
+        # delivery_metrics의 실제 데이터를 기반으로 판정을 재계산
+        v_atf = float(settlement_data["v_atf"]) if settlement_data["v_atf"] else 0.0
+        clicked = bool(settlement_data["clicked"])
+        t_dwell_on_ad_site = (
+            float(settlement_data["t_dwell_on_ad_site"])
+            if settlement_data["t_dwell_on_ad_site"]
+            else 0.0
+        )
+        primary_reward = (
+            float(settlement_data["primary_reward"])
+            if settlement_data["primary_reward"]
+            else 0.0
+        )
+
+        # 실제 SLA 지표를 기반으로 판정 재계산
+        recalculated_decision = None
+        if clicked and v_atf >= 0.3:
+            if t_dwell_on_ad_site >= 20.0:
+                recalculated_decision = "PASSED"
+            elif t_dwell_on_ad_site > 3.0:
+                recalculated_decision = "PARTIAL"
+            else:
+                recalculated_decision = "FAILED"
+        else:
+            recalculated_decision = "FAILED"
+
+        # settlements 테이블의 decision이 있으면 우선 사용, 없으면 재계산된 값 사용
+        final_decision = (
+            settlement_data["decision"]
+            if settlement_data["decision"]
+            else recalculated_decision
+        )
+
+        # 재계산된 판정이 더 정확하면 그것을 사용 (settlements의 decision이 없거나, 재계산 결과가 다르면)
+        if not settlement_data["decision"] or (
+            recalculated_decision
+            and recalculated_decision != settlement_data["decision"]
+        ):
+            final_decision = recalculated_decision
+
+        # 정산 금액 재계산
+        recalculated_amount = 0.0
+        if final_decision == "PASSED":
+            # 전액 지급
+            recalculated_amount = primary_reward
+        elif final_decision == "PARTIAL":
+            # 선형 보상 계산: 3초 = 25%, 20초 = 100%로 선형 보간
+            if t_dwell_on_ad_site <= 3.0:
+                ratio = 0.0
+            elif t_dwell_on_ad_site >= 20.0:
+                ratio = 1.0
+            else:
+                # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
+                ratio = 0.25 + 0.75 * (t_dwell_on_ad_site - 3.0) / (20.0 - 3.0)
+                ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
+            recalculated_amount = primary_reward * ratio
+        else:  # FAILED
+            recalculated_amount = 0.0
+
+        # settlements 테이블의 금액이 있고 판정이 같으면 그것을 사용, 아니면 재계산된 금액 사용
+        final_amount = (
+            float(settlement_data["settled_amount"])
+            if settlement_data["settled_amount"]
+            and settlement_data["decision"] == final_decision
+            else recalculated_amount
+        )
+
+        if final_decision:
+            result["settlement"] = {
+                "decision": final_decision,
+                "settled_amount": final_amount,
+                "settled_at": (
+                    settlement_data["settled_at"].isoformat()
+                    if settlement_data["settled_at"]
+                    else None
+                ),
+                "metrics": {
+                    "v_atf": v_atf,
+                    "clicked": clicked,
+                    "t_dwell_on_ad_site": t_dwell_on_ad_site,
+                    "created_at": (
+                        settlement_data["metrics_created_at"].isoformat()
+                        if settlement_data["metrics_created_at"]
+                        else None
+                    ),
+                },
+            }
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_settlement_receipt error: %r", e)
+        raise HTTPException(status_code=500, detail=f"정산 영수증 조회 실패: {str(e)}")
 
 
 @app.get("/analytics/auto-bidding/{advertiser_id}")

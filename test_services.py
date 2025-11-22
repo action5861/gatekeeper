@@ -16,20 +16,20 @@ def test_service_status():
         "User Service": "http://localhost:8002",
     }
 
-    print("🔍 Checking service status...")
+    print("Checking service status...")
     for name, url in services.items():
         try:
             response = requests.get(url, timeout=3)
-            print(f"✅ {name}: {response.status_code}")
+            print(f"OK {name}: {response.status_code}")
         except requests.exceptions.ConnectionError:
-            print(f"❌ {name}: Connection refused")
+            print(f"FAIL {name}: Connection refused")
         except Exception as e:
-            print(f"⚠️ {name}: {e}")
+            print(f"WARN {name}: {e}")
 
 
 def test_quality_evaluation():
     """품질 평가 API를 직접 테스트합니다."""
-    print("\n🧪 Testing quality evaluation...")
+    print("\nTesting quality evaluation...")
 
     try:
         response = requests.post(
@@ -39,25 +39,25 @@ def test_quality_evaluation():
             timeout=10,
         )
 
-        print(f"📊 Analysis Service Response: {response.status_code}")
+        print(f"Analysis Service Response: {response.status_code}")
 
         if response.status_code == 200:
             result = response.json()
-            print("✅ SUCCESS! Analysis service working!")
-            print(f"📋 Score: {result['data']['score']}")
-            print(f"📋 Commercial Value: {result['data']['commercialValue']}")
+            print("SUCCESS! Analysis service working!")
+            print(f"Score: {result['data']['score']}")
+            print(f"Commercial Value: {result['data']['commercialValue']}")
             return True
         else:
-            print(f"❌ Error: {response.text}")
+            print(f"Error: {response.text}")
             return False
 
     except Exception as e:
-        print(f"❌ Analysis service error: {e}")
+        print(f"Analysis service error: {e}")
         return False
 
 
 def main():
-    print("🚀 Service Status Check...")
+    print("Service Status Check...")
     print("=" * 50)
 
     test_service_status()
@@ -65,19 +65,12 @@ def main():
 
     print("\n" + "=" * 50)
     if analysis_ok:
-        print("🎉 All services are working correctly!")
-        print("💡 Now try the web interface at http://localhost:3000")
+        print("All services are working correctly!")
+        print("Now try the web interface at http://localhost:3000")
     else:
-        print("❌ Some services have issues.")
-        print("💡 Please check the service logs for more details.")
+        print("Some services have issues.")
+        print("Please check the service logs for more details.")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-

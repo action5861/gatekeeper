@@ -34,14 +34,21 @@ export function TransactionHistory({ initialTransactions }: Props) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 거래 내역 새로고침 함수
+  // [LIVE] 거래 내역 새로고침 함수 - 새로운 API 사용
   const refreshTransactions = async () => {
     setIsRefreshing(true);
     try {
-      const response = await fetch('/api/user/dashboard');
+      const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_BASE}/api/dashboard/transactions`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
       if (response.ok) {
         const data = await response.json();
-        setTransactions(data.transactions || []);
+        setTransactions(data.items || []);
       }
     } catch (error) {
       console.error('Failed to refresh transactions:', error);
@@ -98,7 +105,7 @@ export function TransactionHistory({ initialTransactions }: Props) {
 
       // 성공 시 알림
       if (result.status === '2차 완료') {
-        alert(`Secondary reward claimed successfully! +${result.secondaryReward?.toLocaleString()}원`);
+        alert(`Secondary reward claimed successfully! +${result.secondaryReward?.toLocaleString()}P`);
       } else if (result.status === '검증 실패') {
         alert('Verification failed. Please try again with different proof.');
       }
@@ -168,8 +175,8 @@ export function TransactionHistory({ initialTransactions }: Props) {
             <tr className="border-b border-slate-600">
               <th className="text-left py-3 px-3 font-medium text-slate-300">Search Query</th>
               <th className="text-left py-3 px-3 font-medium text-slate-300">Buyer</th>
-              <th className="text-left py-3 px-3 font-medium text-slate-300">Primary Reward</th>
-              <th className="text-left py-3 px-3 font-medium text-slate-300">Secondary Reward</th>
+              <th className="text-left py-3 px-3 font-medium text-slate-300">Quoted Value</th>
+              <th className="text-left py-3 px-3 font-medium text-slate-300">Settled Value</th>
               <th className="text-left py-3 px-3 font-medium text-slate-300">Status</th>
               <th className="text-left py-3 px-3 font-medium text-slate-300">Date</th>
               <th className="text-left py-3 px-3 font-medium text-slate-300">Action</th>
@@ -185,11 +192,11 @@ export function TransactionHistory({ initialTransactions }: Props) {
                   {transaction.buyerName}
                 </td>
                 <td className="py-3 px-3 text-green-400 font-semibold">
-                  {transaction.primaryReward.toLocaleString()}원
+                  {transaction.primaryReward.toLocaleString()}P
                 </td>
                 <td className="py-3 px-3 text-blue-400 font-semibold">
                   {transaction.secondaryReward
-                    ? `${transaction.secondaryReward.toLocaleString()}원`
+                    ? `${transaction.secondaryReward.toLocaleString()}P`
                     : '-'
                   }
                 </td>

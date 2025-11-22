@@ -646,6 +646,96 @@ async def settle_trade(request: Request):
     )
 
 
+# [LIVE] Dashboard metrics endpoints
+from fastapi import APIRouter, Depends, HTTPException
+from jose import jwt, JWTError
+from databases import Database
+from datetime import datetime, timedelta, timezone
+
+
+# Database connection (assuming it's available)
+async def get_db():
+    # This should be replaced with actual database connection
+    # For now, we'll use the existing proxy pattern
+    pass
+
+
+KST = timezone(timedelta(hours=9))
+
+
+def get_user_id_from_token(auth_header: str) -> int:
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ")[1]
+    try:
+        payload = jwt.get_unverified_claims(token)
+        # 토큰에 포함된 user_id/email 등 프로젝트 규격에 맞춰 수정
+        return int(payload.get("user_id") or payload.get("sub_id") or 1)
+    except JWTError:  # 필요 시 검증용 키 적용
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# [LIVE] 테이블 존재 체크
+async def has_table(db: Database, table: str) -> bool:
+    row = await db.fetch_one(
+        """
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name=:t
+      ) AS ok
+    """,
+        {"t": table},
+    )
+    return bool(row and row["ok"])
+
+
+@app.get("/api/dashboard/summary")
+async def get_dashboard_summary(request: Request):
+    """대시보드 요약 정보 - 평균 품질 점수, 성공률, 오늘의 입찰/보상 정보"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    user_id = get_user_id_from_token(auth_header)
+
+    # User service로 프록시 (실제 DB 쿼리는 user service에서 처리)
+    return await proxy_request(
+        "user", "/dashboard/summary", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/quality-history")
+async def get_quality_history(request: Request):
+    """품질 이력 데이터 - 최근 14일 일자별 평균 품질"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/quality-history", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/transactions")
+async def get_transactions(request: Request):
+    """거래 내역 - 최근 50개 트랜잭션"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/transactions", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/realtime")
+async def get_realtime(request: Request):
+    """실시간 통계 - 최근 10분 활동"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/realtime", "GET", auth_required=True, request=request
+    )
+
+
 # 헬스체크
 @app.get("/health")
 async def health_check():

@@ -16,6 +16,10 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
   const [timeLeft, setTimeLeft] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
 
+  // 매칭 실패 여부 판단 (모든 bid가 platform_bid_로 시작하면 매칭 실패)
+  const isMatchingFailed = auction && auction.bids.length > 0 &&
+    auction.bids.every(bid => bid.id.startsWith('platform_bid_'))
+
   // 남은 시간 계산
   useEffect(() => {
     if (!auction) return
@@ -58,7 +62,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
       if (data.success) {
         onBidSelect(bidId)
-        alert(`1차 보상이 지급되었습니다! (${data.data.rewardAmount.toLocaleString()}원)`)
+        alert(`1차 보상이 지급되었습니다! (${data.data.rewardAmount.toLocaleString()} P)`)
       } else {
         alert('입찰 선택에 실패했습니다.')
       }
@@ -114,8 +118,17 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
     <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
       <h3 className="text-2xl font-semibold mb-6 text-slate-100 flex items-center space-x-2">
         <TrendingUp className="w-6 h-6 text-blue-400" />
-        <span>Live Auction Status</span>
+        <span>{isMatchingFailed ? 'Intendex 보너스 지급' : 'Live Auction Status'}</span>
       </h3>
+
+      {/* 매칭 실패 시 안내 문구 */}
+      {isMatchingFailed && (
+        <div className="mb-6 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
+          <p className="text-slate-300">
+            검색 의도와 일치하는 광고주를 찾지 못했습니다. Intendex가 기본 보너스를 대신 지급합니다.
+          </p>
+        </div>
+      )}
 
       {/* Auction Info */}
       <div className="grid md:grid-cols-3 gap-4 mb-6">
@@ -130,25 +143,49 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
         <div className="bg-slate-700/30 rounded-lg p-4">
           <div className="flex items-center space-x-2 mb-2">
             <Users className="w-5 h-5 text-green-400" />
-            <span className="text-slate-300 font-medium">Bidders</span>
+            <span className="text-slate-300 font-medium">{isMatchingFailed ? '광고주 매칭' : 'Bidders'}</span>
           </div>
-          <div className="text-2xl font-bold text-green-400">{auction.bids.length}</div>
+          <div className="text-2xl font-bold text-green-400">{isMatchingFailed ? 0 : auction.bids.length}</div>
         </div>
 
-        <div className="bg-slate-700/30 rounded-lg p-4">
-          <div className="flex items-center space-x-2 mb-2">
-            <DollarSign className="w-5 h-5 text-yellow-400" />
-            <span className="text-slate-300 font-medium">Top Bid</span>
+        {isMatchingFailed ? (
+          <div className="bg-slate-700/30 rounded-lg p-4">
+            <div className="flex items-center space-x-2 mb-2">
+              <Users className="w-5 h-5 text-green-400" />
+              <span className="text-slate-300 font-medium">보상 옵션</span>
+            </div>
+            <div className="text-2xl font-bold text-green-400">{auction.bids.length}</div>
           </div>
-          <div className="text-2xl font-bold text-yellow-400">
-            {auction.bids.length > 0 ? auction.bids[0].price.toLocaleString() : 0}원
+        ) : (
+          <div className="bg-slate-700/30 rounded-lg p-4">
+            <div className="flex items-center space-x-2 mb-2">
+              <DollarSign className="w-5 h-5 text-yellow-400" />
+              <span className="text-slate-300 font-medium">Top Bid</span>
+            </div>
+            <div className="text-2xl font-bold text-yellow-400">
+              {auction.bids.length > 0 ? auction.bids[0].price.toLocaleString() : 0} P
+            </div>
           </div>
-        </div>
+        )}
+
+        {isMatchingFailed && (
+          <div className="bg-slate-700/30 rounded-lg p-4">
+            <div className="flex items-center space-x-2 mb-2">
+              <DollarSign className="w-5 h-5 text-yellow-400" />
+              <span className="text-slate-300 font-medium">기본 보상</span>
+            </div>
+            <div className="text-2xl font-bold text-yellow-400">
+              {auction.bids.length > 0 ? `${auction.bids[0].price} P` : '0 P'}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Bids List */}
       <div className="space-y-3">
-        <h4 className="text-lg font-semibold text-slate-100 mb-4">Current Bids</h4>
+        <h4 className="text-lg font-semibold text-slate-100 mb-4">
+          {isMatchingFailed ? '기본 보상 옵션' : 'Current Bids'}
+        </h4>
 
         {auction.bids.length === 0 ? (
           <div className="text-center py-8">
@@ -174,7 +211,9 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                       #{index + 1}
                     </div>
                     <div>
-                      <div className="font-semibold text-slate-100">{bid.buyerName}</div>
+                      <div className="font-semibold text-slate-100">
+                        {isMatchingFailed && bid.buyerName === 'Intendex' ? 'Intendex 보상' : bid.buyerName}
+                      </div>
                       <div className="text-sm text-slate-400">{bid.bonus}</div>
                     </div>
                   </div>
@@ -182,7 +221,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
                 <div className="text-right mr-6">
                   <div className="text-2xl font-bold text-slate-100">
-                    {bid.price.toLocaleString()}원
+                    {bid.price.toLocaleString()} P
                   </div>
                   <div className="text-sm text-slate-400">
                     {new Date(bid.timestamp).toLocaleTimeString()}
@@ -193,7 +232,7 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                   onClick={() => handleBidClick(bid)}
                   className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200 flex items-center space-x-2 whitespace-nowrap"
                 >
-                  <span>Visit & Get {bid.price}원</span>
+                  <span>Visit & Get {bid.price.toLocaleString()} P</span>
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                   </svg>

@@ -1,4 +1,4 @@
--- PostgreSQL의 LIKE 검색 성능을 가속하기 위해 pg_trgm 확장을 활성화합니다.
+ -- PostgreSQL의 LIKE 검색 성능을 가속하기 위해 pg_trgm 확장을 활성화합니다.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- 1. 키워드 매칭 성능 최적화를 위한 인덱스 추가

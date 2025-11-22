@@ -1,2 +1,0 @@
-# Auction Service Package
-

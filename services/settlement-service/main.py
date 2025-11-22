@@ -22,6 +22,35 @@ app = FastAPI(title="Settlement Service", version="1.0.0")
 @app.on_event("startup")
 async def startup():
     await connect_to_database()
+    # Ensure required columns exist
+    try:
+        await database.execute(
+            """
+            ALTER TABLE transactions ADD COLUMN IF NOT EXISTS bid_id TEXT;
+            """
+        )
+        await database.execute(
+            """
+            ALTER TABLE transactions ADD COLUMN IF NOT EXISTS secondary_reward NUMERIC;
+            """
+        )
+        await database.execute(
+            """
+            ALTER TABLE transactions ADD COLUMN IF NOT EXISTS settlement_decision TEXT;
+            """
+        )
+        await database.execute(
+            """
+            ALTER TABLE settlements ADD COLUMN IF NOT EXISTS dwell_time NUMERIC;
+            """
+        )
+        await database.execute(
+            """
+            ALTER TABLE settlements ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            """
+        )
+    except Exception as e:
+        print(f"⚠️ Schema ensure failed (non-fatal): {e}")
 
 
 # 🛑 종료 이벤트
@@ -82,6 +111,8 @@ class Transaction(BaseModel):
     query: str = Field(..., max_length=500)
     buyerName: str = Field(..., max_length=100)
     primaryReward: int = Field(..., ge=0, le=1000000)
+    secondaryReward: Optional[int] = None
+    settlementDecision: Optional[str] = None
     status: str = Field(..., max_length=50)
     timestamp: str = Field(..., max_length=50)
 
@@ -129,6 +160,7 @@ class RewardRequest(BaseModel):
     query: str = Field(..., max_length=500)
     buyerName: str = Field(..., max_length=100)
     amount: int = Field(..., ge=0, le=1000000)
+    bidId: Optional[str] = None
 
     @validator("query")
     def validate_query(cls, v):
@@ -279,7 +311,9 @@ async def process_reward(
                 query=request.query or "Unknown Search",
                 buyerName=request.buyerName or "Unknown Buyer",
                 primaryReward=request.amount,
-                status="1차 완료",
+                secondaryReward=None,
+                settlementDecision=None,
+                status="SLA_PENDING",  # 🔥 변경: 일관된 대기 상태
                 timestamp=datetime.now().isoformat(),
             )
 
@@ -289,8 +323,8 @@ async def process_reward(
 
             # PostgreSQL에 거래 내역 저장 (실제 사용자 ID 사용)
             query = """
-            INSERT INTO transactions (id, user_id, query_text, buyer_name, primary_reward, status) 
-            VALUES (:id, :user_id, :query_text, :buyer_name, :primary_reward, :status)
+            INSERT INTO transactions (id, user_id, query_text, buyer_name, primary_reward, status, bid_id) 
+            VALUES (:id, :user_id, :query_text, :buyer_name, :primary_reward, :status, :bid_id)
             """
             await database.execute(
                 query,
@@ -301,6 +335,7 @@ async def process_reward(
                     "buyer_name": new_transaction.buyerName,
                     "primary_reward": new_transaction.primaryReward,
                     "status": new_transaction.status,
+                    "bid_id": request.bidId,
                 },
             )
 
@@ -352,10 +387,23 @@ async def get_transactions():
         # PostgreSQL에서 거래 내역 조회
         transactions_data = await database.fetch_all(
             """
-            SELECT id, query_text as query, buyer_name as "buyerName", 
-                   primary_reward as "primaryReward", status, created_at as timestamp
-            FROM transactions 
-            ORDER BY created_at DESC
+            SELECT t.id,
+                   t.query_text AS query,
+                   t.buyer_name AS "buyerName",
+                   t.primary_reward AS "primaryReward",
+                   s.payable_amount AS "secondaryReward",
+                   s.verification_decision AS "settlementDecision",
+                   COALESCE(s.verification_decision, t.status) AS status,
+                   t.created_at AS timestamp
+            FROM transactions t
+            LEFT JOIN LATERAL (
+              SELECT verification_decision, payable_amount
+              FROM settlements s
+              WHERE s.trade_id = COALESCE(t.bid_id, t.id)
+              ORDER BY created_at DESC
+              LIMIT 1
+            ) s ON TRUE
+            ORDER BY t.created_at DESC
             """
         )
 
@@ -366,6 +414,16 @@ async def get_transactions():
                 query=row["query"],
                 buyerName=row["buyerName"],
                 primaryReward=int(row["primaryReward"]),
+                secondaryReward=(
+                    int(row["secondaryReward"])
+                    if row["secondaryReward"] is not None
+                    else None
+                ),
+                settlementDecision=(
+                    row["settlementDecision"]
+                    if row["settlementDecision"] is not None
+                    else None
+                ),
                 status=row["status"],
                 timestamp=(
                     row["timestamp"].isoformat()
@@ -466,6 +524,7 @@ class SettlementRequest(BaseModel):
     trade_id: str
     verification_decision: str
     metrics: Optional[dict] = None
+    dwell_time: Optional[float] = None  # 체류시간 직접 전달 (선택적)
 
 
 @app.post("/settle-trade")
@@ -484,19 +543,39 @@ async def settle_trade_api(request: SettlementRequest):
 
         async with database.transaction():
             # 1. 원거래 정보(user_id, 원래 보상액) 조회
+            # 이미 처리된 거래도 재처리 가능하도록 수정 (모든 상태 포함)
+            # bid_id와 id 모두 확인
             trade = await database.fetch_one(
-                """SELECT user_id, primary_reward, bid_id 
+                """SELECT user_id, primary_reward, bid_id, status as current_status
                    FROM transactions 
-                   WHERE bid_id = :trade_id AND status = 'PENDING_VERIFICATION'""",
+                   WHERE (bid_id = :trade_id OR id = :trade_id)""",
                 values={"trade_id": request.trade_id},
             )
 
             if not trade:
-                print(f"⚠️ Trade not found or already processed: {request.trade_id}")
+                print(
+                    f"⚠️ Trade not found or already finally settled: {request.trade_id}"
+                )
                 return {
                     "success": False,
-                    "message": "Trade not found or already processed",
+                    "message": "Trade not found or already finally settled",
                 }
+
+            # 이전 settlements 확인 (재처리 시 이전 지급액 확인용)
+            previous_settlement = await database.fetch_one(
+                """SELECT verification_decision, payable_amount 
+                   FROM settlements 
+                   WHERE trade_id = :trade_id 
+                   ORDER BY created_at DESC LIMIT 1""",
+                values={"trade_id": request.trade_id},
+            )
+
+            previous_amount = (
+                float(previous_settlement["payable_amount"])
+                if previous_settlement
+                else 0.0
+            )
+            print(f"📊 Previous settlement: {previous_amount}원")
 
             # 2. 판정 결과에 따라 최종 지급액 계산
             payable_amount = 0.0
@@ -507,19 +586,61 @@ async def settle_trade_api(request: SettlementRequest):
                 print(f"✅ PASSED - Full payment: {payable_amount}원")
 
             elif request.verification_decision == "PARTIAL":
-                # Intendex 부분 정산 함수 적용
-                target_dwell = 3.0
-                actual_dwell = (
-                    request.metrics.get("t_dwell", 0) if request.metrics else 0
-                )
+                # 완벽한 선형 보상 시스템: 3초에서 25%, 20초에서 100%로 선형 보간
+                actual_dwell = 0.0
 
-                # 비율 계산: 0.4 + 0.6 * (actual / target)
-                ratio = 0.4 + 0.6 * (actual_dwell / target_dwell)
-                ratio = max(0, min(1, ratio))  # 0~1로 클램프
+                # 체류시간 추출 (우선순위: dwell_time > metrics)
+                if request.dwell_time is not None and request.dwell_time > 0:
+                    actual_dwell = float(request.dwell_time)
+                    print(f"📊 Using dwell_time from request: {actual_dwell}s")
+                elif request.metrics:
+                    # metrics에서 체류시간 추출 (여러 필드 확인)
+                    dwell_candidates = [
+                        request.metrics.get("t_dwell"),
+                        request.metrics.get("t_dwell_on_ad_site"),
+                        request.metrics.get("dwell_time"),
+                    ]
+                    for candidate in dwell_candidates:
+                        if candidate is not None and float(candidate) > 0:
+                            actual_dwell = float(candidate)
+                            print(f"📊 Using dwell_time from metrics: {actual_dwell}s")
+                            break
 
+                if actual_dwell <= 0:
+                    print(f"⚠️ No valid dwell time found, using 0s")
+                    actual_dwell = 0.0
+
+                # 선형 보상 계산 공식
+                # 3초 = 25%, 20초 = 100%로 선형 보간
+                # ratio = 0.25 + 0.75 * (dwell - 3) / (20 - 3)
+                if actual_dwell <= 3.0:
+                    # 3초 이하: 0% (이미 FAILED로 처리되어야 하지만 안전장치)
+                    ratio = 0.0
+                    print(
+                        f"❌ Dwell time too short: {actual_dwell:.2f}s <= 3s, no reward"
+                    )
+                elif actual_dwell >= 20.0:
+                    # 20초 이상: 100% (이미 PASSED로 처리되어야 하지만 안전장치)
+                    ratio = 1.0
+                    print(
+                        f"✅ Dwell time sufficient: {actual_dwell:.2f}s >= 20s, full reward"
+                    )
+                else:
+                    # 3초 초과 ~ 20초 미만: 선형 보간
+                    # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
+                    ratio = 0.25 + 0.75 * (actual_dwell - 3.0) / (20.0 - 3.0)
+                    ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
+                    print(f"📈 Linear calculation: {actual_dwell:.2f}s -> {ratio:.2%}")
+
+                # 최종 보상금액 계산
                 payable_amount = float(trade["primary_reward"]) * ratio
+
                 print(
-                    f"⚠️ PARTIAL - Partial payment: {payable_amount}원 (ratio: {ratio:.2f}, dwell: {actual_dwell}s)"
+                    f"💰 PARTIAL SETTLEMENT:\n"
+                    f"   - 체류시간: {actual_dwell:.2f}초\n"
+                    f"   - 보상비율: {ratio:.2%}\n"
+                    f"   - 원래보상: {trade['primary_reward']}원\n"
+                    f"   - 최종지급: {payable_amount:.2f}원"
                 )
 
             else:  # FAILED
@@ -527,43 +648,61 @@ async def settle_trade_api(request: SettlementRequest):
                 print(f"❌ FAILED - No payment")
 
             # 3. 사용자 잔고 업데이트 및 거래 상태 변경
-            final_status = "FAILED"
+            amount_difference = payable_amount - previous_amount
+            final_status = "SETTLED" if payable_amount > 0 else "FAILED"
 
-            if payable_amount > 0:
-                final_status = "SETTLED"
-                # 🔥 여기서만 사용자 잔고를 업데이트합니다!
+            if amount_difference != 0:
                 await database.execute(
-                    """UPDATE users 
-                       SET total_earnings = total_earnings + :amount 
-                       WHERE id = :user_id""",
-                    values={"amount": payable_amount, "user_id": trade["user_id"]},
+                    """
+                    UPDATE users SET total_earnings = GREATEST(total_earnings + :diff, 0)
+                    WHERE id = :user_id
+                    """,
+                    values={"diff": amount_difference, "user_id": trade["user_id"]},
                 )
+                adj = "+" if amount_difference > 0 else ""
                 print(
-                    f"✅ Updated user balance: +{payable_amount}원 for user_id: {trade['user_id']}"
+                    f"✅ Applied balance diff {adj}{amount_difference}원 for user_id {trade['user_id']} (new payable: {payable_amount}원, prev: {previous_amount}원)"
+                )
+            else:
+                print(
+                    f"ℹ️ No balance change: {payable_amount}원 (same as previous {previous_amount}원)"
                 )
 
-            # 거래 상태 업데이트
+            # 거래 상태 및 정산 결과 업데이트
             await database.execute(
-                """UPDATE transactions 
-                   SET status = :status 
-                   WHERE bid_id = :trade_id""",
-                values={"status": final_status, "trade_id": request.trade_id},
+                """UPDATE transactions
+                       SET status = :status,
+                           secondary_reward = :secondary_reward,
+                           settlement_decision = :decision
+                     WHERE (bid_id = :trade_id OR id = :trade_id)""",
+                values={
+                    "status": final_status,
+                    "secondary_reward": payable_amount,
+                    "decision": request.verification_decision,
+                    "trade_id": request.trade_id,
+                },
             )
-            print(f"✅ Updated transaction status to: {final_status}")
+            print(f"✅ Updated transaction status/settlement: {final_status}")
 
-            # 4. settlements 테이블에 최종 결과 기록
+            # 4. settlements 테이블에 최종 결과 기록 (재처리 시 새 기록 추가)
             await database.execute(
-                """INSERT INTO settlements (trade_id, verification_decision, payable_amount)
-                   VALUES (:trade_id, :decision, :amount)""",
+                """INSERT INTO settlements (trade_id, verification_decision, payable_amount, dwell_time)
+                   VALUES (:trade_id, :decision, :amount, :dwell_time)""",
                 values={
                     "trade_id": request.trade_id,
                     "decision": request.verification_decision,
                     "amount": payable_amount,
+                    "dwell_time": request.dwell_time,
                 },
             )
-            print(
-                f"✅ Settlement recorded: trade_id={request.trade_id}, amount={payable_amount}원"
-            )
+            if previous_amount > 0:
+                print(
+                    f"✅ Settlement updated: trade_id={request.trade_id}, new amount={payable_amount}원 (previous: {previous_amount}원, difference: {amount_difference}원)"
+                )
+            else:
+                print(
+                    f"✅ Settlement recorded: trade_id={request.trade_id}, amount={payable_amount}원"
+                )
 
         return {
             "success": True,

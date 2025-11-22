@@ -1,6 +1,7 @@
 'use client'
 
 import { AnalysisStatusBanner } from '@/components/advertiser/AnalysisStatusBanner'
+import KeywordsCategoriesManager from '@/components/advertiser/KeywordsCategoriesManager'
 import ReviewStatus from '@/components/advertiser/ReviewStatus'
 import AccountSettings from '@/components/dashboard/AccountSettings'
 import BiddingSummary from '@/components/dashboard/BiddingSummary'
@@ -25,12 +26,22 @@ interface DashboardData {
     }>
     recentBids: Array<{
         id: string
+        bidId?: string
         auctionId: string
         amount: number
         timestamp: string
         status: 'active' | 'won' | 'lost' | 'pending'
         highestBid?: number
         myBid: number
+        settlement?: {
+            decision: string
+            settled_amount: number
+            v_atf: number
+            clicked: boolean
+            t_dwell_on_ad_site: number
+            trade_id?: string
+            transaction_id?: string
+        } | null
     }>
     additionalStats?: {
         autoBidEnabled: boolean
@@ -244,6 +255,11 @@ export default function AdvertiserDashboard() {
                         {/* My Bids */}
                         <div className="mt-8 animate-fadeInUp animation-delay-900">
                             <MyBids recentBids={dashboardData?.recentBids} />
+                        </div>
+
+                        {/* Keywords & Categories */}
+                        <div className="mt-8 animate-fadeInUp animation-delay-1000">
+                            <KeywordsCategoriesManager />
                         </div>
                     </>
                 ) : (

@@ -2,8 +2,9 @@
 
 import Header from '@/components/Header';
 import { authenticatedFetch } from '@/lib/auth';
+import { useAnalysisStatus } from '@/lib/hooks/useAnalysisStatus';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, Check, Loader2, Plus, Sparkles, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, ChevronUp, Loader2, Plus, Sparkles, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
@@ -41,11 +42,41 @@ export default function ReviewSuggestionsPage() {
     const [keywords, setKeywords] = useState<Keyword[]>([]);
     const [categories, setCategories] = useState<Category[]>([]);
     const [newKeyword, setNewKeyword] = useState('');
+    const [showAnalysisSummary, setShowAnalysisSummary] = useState(false);
 
-    // AI 제안 데이터 fetch
+    // 분석 상태 확인
+    const { data: analysisStatus, isLoading: isStatusLoading } = useAnalysisStatus();
+    
+    // 분석이 완료되었는지 확인 (pending 상태이고 website_analysis가 있으면 완료)
+    const isAnalysisComplete = analysisStatus && 
+        analysisStatus.approval_status === 'pending' && 
+        analysisStatus.website_analysis !== null;
+
+    // AI 제안 데이터 fetch - 분석이 완료되었을 때만 활성화하고, 완료되지 않았으면 주기적으로 재시도
     const { data, isLoading, error } = useQuery<AISuggestions>({
         queryKey: ['aiSuggestions'],
         queryFn: fetchAISuggestions,
+        enabled: analysisStatus !== undefined && analysisStatus.approval_status !== 'pending_analysis', // 분석이 진행 중이 아닐 때만 활성화
+        refetchInterval: (query) => {
+            // 분석이 완료되지 않았거나 데이터가 없으면 3초마다 재시도
+            const hasData = query.state.data && 
+                (query.state.data.keywords.length > 0 || query.state.data.categories.length > 0);
+            
+            // 분석이 진행 중이 아니고 데이터가 없으면 재시도
+            if (!isAnalysisComplete && !hasData) {
+                return 3000;
+            }
+            // 분석이 완료되었지만 데이터가 아직 없으면 재시도
+            if (isAnalysisComplete && !hasData) {
+                return 3000;
+            }
+            return false;
+        },
+        refetchIntervalInBackground: true,
+        refetchOnMount: true,
+        refetchOnWindowFocus: true,
+        retry: 3, // 최대 3번 재시도
+        retryDelay: 2000, // 2초 간격으로 재시도
     });
 
     useEffect(() => {
@@ -54,6 +85,13 @@ export default function ReviewSuggestionsPage() {
             setCategories(data.categories);
         }
     }, [data]);
+
+    // 분석이 완료되면 AI 제안 쿼리 무효화하여 다시 가져오기
+    useEffect(() => {
+        if (isAnalysisComplete) {
+            queryClient.invalidateQueries({ queryKey: ['aiSuggestions'] });
+        }
+    }, [isAnalysisComplete, queryClient]);
 
     // 키워드 추가
     const handleAddKeyword = () => {
@@ -125,6 +163,92 @@ export default function ReviewSuggestionsPage() {
         mutation.mutate({ keywords, categories });
     };
 
+    // 분석 상태 로딩 중
+    if (isStatusLoading) {
+        return (
+            <div className="min-h-screen bg-slate-900">
+                <Header />
+                <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                    <div className="flex items-center justify-center h-64">
+                        <div className="text-center">
+                            <Loader2 className="w-12 h-12 animate-spin text-blue-400 mx-auto mb-4" />
+                            <p className="text-slate-300">분석 상태를 확인하는 중...</p>
+                        </div>
+                    </div>
+                </main>
+            </div>
+        );
+    }
+
+    // AI 분석 진행 중인 경우 - 분석 진행 화면 표시
+    if (analysisStatus && analysisStatus.approval_status === 'pending_analysis') {
+        return (
+            <div className="min-h-screen bg-slate-900">
+                <Header />
+                <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                    <div className="text-center mb-12">
+                        <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-r from-purple-500 to-pink-500 mb-4">
+                            <Sparkles className="w-8 h-8 text-white" />
+                        </div>
+                        <h1 className="text-4xl font-bold text-slate-100 mb-3">
+                            AI 분석 진행 중
+                        </h1>
+                        <p className="text-xl text-slate-400">
+                            웹사이트를 분석하여 최적의 광고 설정을 생성하고 있습니다
+                        </p>
+                    </div>
+
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8 mb-6">
+                        <div className="flex flex-col items-center justify-center py-12">
+                            <Loader2 className="w-16 h-16 animate-spin text-blue-400 mb-6" />
+                            <h2 className="text-2xl font-semibold text-slate-100 mb-4">
+                                🤖 AI가 분석 중입니다
+                            </h2>
+                            <p className="text-slate-300 mb-2 text-center max-w-md">
+                                웹사이트 내용을 분석하여 추천 키워드와 카테고리를 생성하고 있습니다.
+                            </p>
+                            {analysisStatus.website_url && (
+                                <p className="text-sm text-slate-400 mt-4">
+                                    분석 중인 사이트: <span className="text-blue-400">{analysisStatus.website_url}</span>
+                                </p>
+                            )}
+                            <div className="mt-8 flex items-center gap-2 text-slate-400 text-sm">
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                <span>잠시만 기다려주세요... 페이지가 자동으로 업데이트됩니다</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 분석 진행 단계 표시 */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="bg-slate-800/30 border border-blue-500/30 rounded-xl p-4 text-center">
+                            <div className="w-12 h-12 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                                <Loader2 className="w-6 h-6 animate-spin text-blue-400" />
+                            </div>
+                            <h3 className="text-slate-200 font-semibold mb-2">웹사이트 스크래핑</h3>
+                            <p className="text-xs text-slate-400">웹사이트 내용을 수집 중...</p>
+                        </div>
+                        <div className="bg-slate-800/30 border border-purple-500/30 rounded-xl p-4 text-center">
+                            <div className="w-12 h-12 bg-purple-500/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                                <Sparkles className="w-6 h-6 text-purple-400" />
+                            </div>
+                            <h3 className="text-slate-200 font-semibold mb-2">AI 분석</h3>
+                            <p className="text-xs text-slate-400">Gemini AI가 내용을 분석 중...</p>
+                        </div>
+                        <div className="bg-slate-800/30 border border-slate-600 rounded-xl p-4 text-center">
+                            <div className="w-12 h-12 bg-slate-600/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                                <Check className="w-6 h-6 text-slate-500" />
+                            </div>
+                            <h3 className="text-slate-400 font-semibold mb-2">결과 생성</h3>
+                            <p className="text-xs text-slate-500">대기 중...</p>
+                        </div>
+                    </div>
+                </main>
+            </div>
+        );
+    }
+
+    // AI 제안 로딩 중 (분석은 완료되었지만 데이터를 가져오는 중)
     if (isLoading) {
         return (
             <div className="min-h-screen bg-slate-900">
@@ -141,6 +265,7 @@ export default function ReviewSuggestionsPage() {
         );
     }
 
+    // 에러 처리
     if (error) {
         return (
             <div className="min-h-screen bg-slate-900">
@@ -148,7 +273,13 @@ export default function ReviewSuggestionsPage() {
                 <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
                     <div className="text-center">
                         <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
-                        <p className="text-red-400">AI 제안을 불러올 수 없습니다</p>
+                        <p className="text-red-400 mb-4">AI 제안을 불러올 수 없습니다</p>
+                        <button
+                            onClick={() => queryClient.invalidateQueries({ queryKey: ['aiSuggestions'] })}
+                            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                        >
+                            다시 시도
+                        </button>
                     </div>
                 </main>
             </div>
@@ -172,6 +303,70 @@ export default function ReviewSuggestionsPage() {
                         AI가 분석한 결과를 확인하고 필요한 경우 수정하세요
                     </p>
                 </div>
+
+                {/* AI 분석 요약 섹션 */}
+                {analysisStatus && analysisStatus.website_analysis && (
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6 mb-6">
+                        <button
+                            onClick={() => setShowAnalysisSummary(!showAnalysisSummary)}
+                            className="w-full flex items-center justify-between text-left"
+                        >
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg flex items-center justify-center">
+                                    <Sparkles className="w-5 h-5 text-white" />
+                                </div>
+                                <div>
+                                    <h2 className="text-xl font-semibold text-slate-100">
+                                        AI 분석 요약
+                                    </h2>
+                                    <p className="text-sm text-slate-400">
+                                        웹사이트 분석 결과를 확인하세요
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2 text-slate-400">
+                                {showAnalysisSummary ? (
+                                    <>
+                                        <span className="text-sm">접기</span>
+                                        <ChevronUp className="w-5 h-5" />
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="text-sm">보기</span>
+                                        <ChevronDown className="w-5 h-5" />
+                                    </>
+                                )}
+                            </div>
+                        </button>
+
+                        {showAnalysisSummary && (
+                            <div className="mt-4 pt-4 border-t border-slate-700">
+                                <div className="bg-slate-900/60 rounded-xl p-5">
+                                    <div className="flex items-start gap-3">
+                                        <div className="w-8 h-8 bg-blue-500/20 rounded-lg flex items-center justify-center flex-shrink-0 mt-1">
+                                            <Sparkles className="w-4 h-4 text-blue-400" />
+                                        </div>
+                                        <div className="flex-1">
+                                            <h3 className="text-slate-200 font-medium mb-2">
+                                                분석된 웹사이트
+                                            </h3>
+                                            {analysisStatus.website_url && (
+                                                <p className="text-sm text-blue-400 mb-4 break-all">
+                                                    {analysisStatus.website_url}
+                                                </p>
+                                            )}
+                                            <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                                <p className="text-slate-300 leading-relaxed whitespace-pre-line">
+                                                    {analysisStatus.website_analysis}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {/* 키워드 섹션 */}
                 <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-6 mb-6">

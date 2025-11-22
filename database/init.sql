@@ -1,5 +1,8 @@
 -- 검색 데이터 거래 플랫폼 DB 스키마
 
+-- PostgreSQL 인덱스 최적화: pg_trgm 확장 설치
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- 사용자 테이블
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -242,7 +245,8 @@ CREATE TABLE IF NOT EXISTS advertiser_reviews (
 -- 자동 입찰 설정 테이블
 CREATE TABLE IF NOT EXISTS auto_bid_settings (
     id SERIAL PRIMARY KEY,
-    advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
+    advertiser_id INTEGER NOT NULL REFERENCES advertisers(id) ON DELETE CASCADE,
+    CONSTRAINT auto_bid_settings_advertiser_unique UNIQUE (advertiser_id),
     is_enabled BOOLEAN DEFAULT false,
     daily_budget DECIMAL(10,2) DEFAULT 10000.00,
     max_bid_per_keyword INTEGER DEFAULT 3000,
@@ -259,6 +263,40 @@ CREATE INDEX IF NOT EXISTS idx_advertiser_categories_path ON advertiser_categori
 CREATE INDEX IF NOT EXISTS idx_business_categories_parent ON business_categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_advertiser_reviews_status ON advertiser_reviews(review_status);
 CREATE INDEX IF NOT EXISTS idx_auto_bid_settings_enabled ON auto_bid_settings(is_enabled);
+
+-- PostgreSQL 인덱스 최적화: pg_trgm 기반 텍스트 검색 인덱스
+-- ⚠️ 중요: 이 인덱스들은 매칭 쿼리 성능을 대폭 향상시킵니다
+-- pg_trgm 확장은 이미 상단(Line 4)에서 설치됨
+
+-- 1. GIN 인덱스 (Trigram 기반 유사도 검색)
+-- LIKE '%keyword%' 패턴 매칭 성능 향상 (10~100배)
+CREATE INDEX IF NOT EXISTS idx_adv_kw_trgm
+ON advertiser_keywords USING gin (lower(keyword) gin_trgm_ops);
+
+-- 2. 표현식 인덱스 (정확 매칭 최적화)
+-- lower(replace(keyword, ' ', '')) 표현식 검색 성능 향상
+CREATE INDEX IF NOT EXISTS idx_adv_kw_exact_expr
+ON advertiser_keywords ((lower(replace(keyword, ' ', ''))));
+
+-- 3. 카테고리 이름 Trigram 인덱스
+-- business_categories의 name 필드 LIKE 검색 성능 향상
+CREATE INDEX IF NOT EXISTS idx_cat_name_trgm
+ON business_categories USING gin (lower(name) gin_trgm_ops);
+
+-- 4. 카테고리 경로 패턴 인덱스
+-- LIKE '경로%' 패턴 매칭 성능 향상 (advertiser_categories)
+CREATE INDEX IF NOT EXISTS idx_adv_cat_path
+ON advertiser_categories (category_path text_pattern_ops);
+
+-- 일일 예산 소비 추적 테이블 (트랜잭션 안정성을 위해)
+CREATE TABLE IF NOT EXISTS advertiser_daily_spend (
+    advertiser_id INT,
+    spend_date DATE,
+    amount BIGINT,
+    PRIMARY KEY(advertiser_id, spend_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_advertiser_daily_spend_date ON advertiser_daily_spend(spend_date);
 
 -- 자동 입찰 로그 테이블 (머신러닝 분석용)
 CREATE TABLE IF NOT EXISTS auto_bid_logs (

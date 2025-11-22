@@ -56,7 +56,7 @@ services:
 
   # 🏪 Auction Service
   auction-service:
-    build: ./services/auction-service
+    build: ./services/auction_service
     container_name: auction-service
     ports:
       - "8002:8002"
@@ -236,6 +236,7 @@ services:
       - "3000:3000"
     environment:
       - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000
       - API_GATEWAY_URL=http://api-gateway:8000
       - USER_SERVICE_URL=http://user-service:8005
       - ADVERTISER_SERVICE_URL=http://advertiser-service:8007
