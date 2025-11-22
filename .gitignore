@@ -60,5 +60,3 @@ logs/
 dist/
 build/
 *.egg-info/
-
-GOOGLE_GEMINI_API_KEY=AIzaSyADTuO4BXVG_p92h-Kn56RffPgwCCCZbpw

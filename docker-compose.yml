@@ -46,7 +46,7 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
-      - GEMINI_API_KEY=AIzaSyCj2lffHsQjeptA4y7kcLf9arIDbDMObS8
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=models/gemini-flash-latest
     networks:
       - app-network
@@ -182,9 +182,11 @@ services:
     container_name: website-analysis-service
     ports:
       - "8009:8009"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
-      - GEMINI_API_KEY=AIzaSyCj2lffHsQjeptA4y7kcLf9arIDbDMObS8
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=models/gemini-flash-latest
     networks:
       - app-network
