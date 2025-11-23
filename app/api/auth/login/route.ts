@@ -37,12 +37,37 @@ export async function POST(request: NextRequest) {
             body: JSON.stringify(requestBody),
         })
 
-        const data = await response.json()
+        // 응답 본문을 안전하게 파싱
+        let data: any = {}
+        try {
+            const text = await response.text()
+            const contentType = response.headers.get('content-type')
+            
+            if (contentType && contentType.includes('application/json')) {
+                try {
+                    data = JSON.parse(text)
+                } catch (parseError) {
+                    console.error(`Failed to parse JSON response for ${userType}:`, parseError)
+                    console.error(`Response text: ${text.substring(0, 500)}`)
+                    data = { detail: text || `Login failed with status ${response.status}` }
+                }
+            } else {
+                console.error(`Non-JSON response for ${userType} (${contentType}):`, text.substring(0, 500))
+                try {
+                    data = JSON.parse(text)
+                } catch {
+                    data = { detail: text || `Login failed with status ${response.status}` }
+                }
+            }
+        } catch (readError) {
+            console.error(`Failed to read response for ${userType}:`, readError)
+            data = { detail: `Failed to read response: ${readError instanceof Error ? readError.message : 'Unknown error'}` }
+        }
 
         if (!response.ok) {
             console.error(`Login failed for ${userType}:`, data)
             return NextResponse.json(
-                { message: data.detail || `Login failed for ${userType}` },
+                { message: data.detail || data.message || `Login failed for ${userType}` },
                 { status: response.status }
             )
         }

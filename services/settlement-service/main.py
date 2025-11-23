@@ -5,6 +5,7 @@ from pydantic import BaseModel, validator, Field
 from typing import List, Literal, Optional
 from datetime import datetime
 import random
+import uuid
 from jose import JWTError, jwt
 from database import (
     database,
@@ -47,6 +48,12 @@ async def startup():
         await database.execute(
             """
             ALTER TABLE settlements ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            """
+        )
+        # Ensure withdrawal_requests table exists (create if not exists via migration)
+        await database.execute(
+            """
+            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
             """
         )
     except Exception as e:
@@ -527,6 +534,55 @@ class SettlementRequest(BaseModel):
     dwell_time: Optional[float] = None  # 체류시간 직접 전달 (선택적)
 
 
+# Withdrawal/Payout Models
+class WithdrawalRequest(BaseModel):
+    request_amount: int = Field(..., ge=10000, description="Minimum withdrawal: 10,000 Points")
+    bank_name: str = Field(..., min_length=1, max_length=100)
+    account_number: str = Field(..., min_length=1, max_length=100)
+    account_holder: str = Field(..., min_length=1, max_length=100)
+
+    @validator("request_amount")
+    def validate_request_amount(cls, v):
+        if v < 10000:
+            raise ValueError("Minimum withdrawal amount is 10,000 Points")
+        return v
+
+    @validator("bank_name", "account_number", "account_holder")
+    def validate_bank_info(cls, v):
+        v = sanitize_input(v)
+        if not validate_sql_injection(v):
+            raise ValueError("Invalid characters in bank information")
+        return v
+
+
+class WithdrawalResponse(BaseModel):
+    success: bool
+    message: str
+    withdrawal_id: Optional[str] = None
+    request_amount: Optional[int] = None
+    tax_amount: Optional[int] = None
+    final_amount: Optional[int] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class WithdrawalHistoryItem(BaseModel):
+    id: str
+    request_amount: int
+    tax_amount: int
+    final_amount: int
+    bank_name: str
+    account_number: str
+    account_holder: str
+    status: str
+    created_at: str
+
+
+class WithdrawalHistoryResponse(BaseModel):
+    withdrawals: List[WithdrawalHistoryItem]
+    total: int
+
+
 @app.post("/settle-trade")
 async def settle_trade_api(request: SettlementRequest):
     """
@@ -720,6 +776,171 @@ async def settle_trade_api(request: SettlementRequest):
         traceback.print_exc()
         raise HTTPException(
             status_code=500, detail=f"정산 처리 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@app.post("/api/settlement/withdraw", response_model=WithdrawalResponse)
+async def request_withdrawal(
+    request: WithdrawalRequest,
+    user_id: int = Depends(get_user_id_from_token),
+):
+    """
+    출금 요청을 처리합니다.
+    - 최소 출금 금액: 10,000 Points
+    - 원자적 트랜잭션으로 잔고 차감 및 출금 요청 기록
+    """
+    try:
+        print(f"💸 Withdrawal request from user {user_id}: {request.dict()}")
+
+        # Input validation is handled by Pydantic
+
+        # No tax deduction - full amount is paid
+        tax_amount = 0
+        final_amount = request.request_amount
+
+        async with database.transaction():
+            # 1. Check user balance
+            user = await database.fetch_one(
+                "SELECT id, total_earnings FROM users WHERE id = :user_id FOR UPDATE",
+                values={"user_id": user_id},
+            )
+
+            if not user:
+                raise HTTPException(
+                    status_code=404, detail="User not found"
+                )
+
+            current_balance = float(user["total_earnings"]) if user["total_earnings"] else 0.0
+
+            if current_balance < request.request_amount:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient balance. Current balance: {int(current_balance)} Points, Requested: {request.request_amount} Points"
+                )
+
+            # 2. Deduct balance from users.total_earnings
+            new_balance = current_balance - request.request_amount
+            await database.execute(
+                """
+                UPDATE users 
+                SET total_earnings = GREATEST(:new_balance, 0)
+                WHERE id = :user_id
+                """,
+                values={
+                    "new_balance": new_balance,
+                    "user_id": user_id
+                },
+            )
+            print(f"✅ Balance updated: {current_balance} -> {new_balance} Points")
+
+            # 3. Insert withdrawal request record
+            withdrawal_id = str(uuid.uuid4())
+            await database.execute(
+                """
+                INSERT INTO withdrawal_requests 
+                (id, user_id, request_amount, tax_amount, final_amount, bank_name, account_number, account_holder, status)
+                VALUES (:id, :user_id, :request_amount, :tax_amount, :final_amount, :bank_name, :account_number, :account_holder, 'REQUESTED')
+                """,
+                values={
+                    "id": withdrawal_id,
+                    "user_id": user_id,
+                    "request_amount": request.request_amount,
+                    "tax_amount": tax_amount,
+                    "final_amount": final_amount,
+                    "bank_name": request.bank_name,
+                    "account_number": request.account_number,
+                    "account_holder": request.account_holder,
+                },
+            )
+            print(f"✅ Withdrawal request created: {withdrawal_id}")
+
+        return WithdrawalResponse(
+            success=True,
+            message=f"출금 요청이 접수되었습니다. {final_amount:,} Points가 지급됩니다.",
+            withdrawal_id=withdrawal_id,
+            request_amount=request.request_amount,
+            tax_amount=tax_amount,
+            final_amount=final_amount,
+            status="REQUESTED",
+            created_at=datetime.now().isoformat(),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Withdrawal error for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"출금 요청 처리 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@app.get("/api/settlement/withdraw/history", response_model=WithdrawalHistoryResponse)
+async def get_withdrawal_history(
+    user_id: int = Depends(get_user_id_from_token),
+):
+    """
+    사용자의 출금 내역을 조회합니다.
+    최신순(created_at DESC)으로 정렬됩니다.
+    """
+    try:
+        print(f"📜 Fetching withdrawal history for user {user_id}")
+
+        # Fetch withdrawal history from database
+        withdrawals_data = await database.fetch_all(
+            """
+            SELECT 
+                id::text as id,
+                request_amount,
+                tax_amount,
+                final_amount,
+                bank_name,
+                account_number,
+                account_holder,
+                status,
+                created_at
+            FROM withdrawal_requests
+            WHERE user_id = :user_id
+            ORDER BY created_at DESC
+            """,
+            values={"user_id": user_id},
+        )
+
+        # Convert to Pydantic models
+        withdrawals = [
+            WithdrawalHistoryItem(
+                id=row["id"],
+                request_amount=int(row["request_amount"]),
+                tax_amount=int(row["tax_amount"]),
+                final_amount=int(row["final_amount"]),
+                bank_name=row["bank_name"],
+                account_number=row["account_number"],
+                account_holder=row["account_holder"],
+                status=row["status"],
+                created_at=(
+                    row["created_at"].isoformat()
+                    if row["created_at"]
+                    else datetime.now().isoformat()
+                ),
+            )
+            for row in withdrawals_data
+        ]
+
+        print(f"✅ Found {len(withdrawals)} withdrawal records for user {user_id}")
+        return WithdrawalHistoryResponse(
+            withdrawals=withdrawals,
+            total=len(withdrawals),
+        )
+
+    except Exception as e:
+        print(f"❌ Error fetching withdrawal history for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"출금 내역 조회 중 오류가 발생했습니다: {str(e)}"
         )
 
 

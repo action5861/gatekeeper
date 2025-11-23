@@ -7,6 +7,16 @@ from database import (
     connect_to_database,
     disconnect_from_database,
 )
+import sys
+from pathlib import Path
+
+# 공통 한도 정책 모듈 import
+# services 디렉토리를 Python 경로에 추가
+services_path = Path(__file__).parent.parent
+if str(services_path) not in sys.path:
+    sys.path.insert(0, str(services_path))
+
+from shared.limit_policy import calculate_dynamic_limit, LimitInfo
 
 app = FastAPI(title="Quality Service", version="1.0.0")
 
@@ -43,6 +53,7 @@ class SubmissionLimit(BaseModel):
         "Below Average",
         "Poor",
         "Very Poor",
+        "Standard",  # 호환성을 위해 추가
     ]
     dailyMax: int
 
@@ -57,13 +68,8 @@ class CalculateLimitResponse(BaseModel):
     message: str
 
 
-def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    """일일 제출 한도를 기본값 5개로 설정합니다."""
-    # 모든 사용자에게 동일하게 하루 5번 제출 한도 제공
-    # 추후 quality_score에 따라 동적으로 변경 가능
-    result = SubmissionLimit(level="Average", dailyMax=5)
-    print(f"🔍 디버그: 고정 일일 제출 한도 설정, dailyMax={result.dailyMax}")
-    return result
+# calculate_dynamic_limit 함수는 이제 shared.limit_policy에서 import하여 사용
+# 기존 함수는 제거하고 공통 모듈 사용
 
 
 @app.post("/calculate-limit", response_model=CalculateLimitResponse)
@@ -76,8 +82,9 @@ async def calculate_submission_limit(request: CalculateLimitRequest):
                 status_code=400, detail="품질 점수는 0-100 사이여야 합니다."
             )
 
-        # 동적 제출 한도 계산
-        submission_limit = calculate_dynamic_limit(request.qualityScore)
+        # 동적 제출 한도 계산 (공통 모듈 사용)
+        limit_info = calculate_dynamic_limit(request.qualityScore)
+        submission_limit = SubmissionLimit(level=limit_info.level, dailyMax=limit_info.daily_max)
 
         # 품질 점수 계산 결과를 DB에 저장
         quality_query = """

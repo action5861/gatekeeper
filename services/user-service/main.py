@@ -18,6 +18,16 @@ from database import (
     disconnect_from_database,
 )
 import json
+import sys
+from pathlib import Path
+
+# 공통 한도 정책 모듈 import
+# services 디렉토리를 Python 경로에 추가
+services_path = Path(__file__).parent.parent
+if str(services_path) not in sys.path:
+    sys.path.insert(0, str(services_path))
+
+from shared.limit_policy import calculate_dynamic_limit, LimitInfo
 
 app = FastAPI(title="User Service", version="1.0.0")
 
@@ -343,24 +353,40 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
-def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    """일일 제출 한도를 환경 변수에서 가져옵니다."""
-    # 환경 변수에서 일일 한도 가져오기 (기본값: 5)
-    daily_limit = int(os.getenv("DEFAULT_DAILY_LIMIT", "5"))
-    # 모든 사용자에게 동일하게 하루 제출 한도 제공
-    # 추후 quality_score에 따라 동적으로 변경 가능
-    return SubmissionLimit(level="Standard", dailyMax=daily_limit)
+# calculate_dynamic_limit 함수는 이제 shared.limit_policy에서 import하여 사용
+# 기존 함수는 제거하고 공통 모듈 사용
 
 
 # 🔥 새로운 헬퍼 함수들 - 트랜잭션 기준으로 통일
 async def _used_today_from_tx(user_id: int) -> int:
-    """오늘 생성된 트랜잭션 수를 기준으로 사용량 계산"""
+    """
+    오늘 생성된 트랜잭션 수를 기준으로 사용량 계산
+    상태 무관: PENDING_VERIFICATION, SETTLED, FAILED 모두 포함
+    """
     row = await database.fetch_one(
         """
         SELECT COUNT(*) AS c
         FROM transactions
         WHERE user_id = :uid
           AND created_at::date = CURRENT_DATE
+        """,
+        {"uid": user_id},
+    )
+    return int(row["c"] or 0) if row else 0
+
+
+async def _settled_today_from_tx(user_id: int) -> int:
+    """
+    오늘 정산 완료된 트랜잭션 수 계산
+    추후 보너스 한도 정책에 활용 가능
+    """
+    row = await database.fetch_one(
+        """
+        SELECT COUNT(*) AS c
+        FROM transactions
+        WHERE user_id = :uid
+          AND created_at::date = CURRENT_DATE
+          AND status = 'SETTLED'
         """,
         {"uid": user_id},
     )
@@ -383,14 +409,115 @@ async def _today_quality_avg(user_id: int) -> int:
 
 async def _remaining_from_tx(user_id: int, quality_score: int = 0) -> dict:
     """트랜잭션 기준으로 남은 사용량 계산"""
-    limit = calculate_dynamic_limit(quality_score).dailyMax
+    limit_info = calculate_dynamic_limit(quality_score)
     used = await _used_today_from_tx(user_id)
     return {
         "count": used,
-        "limit": limit,
-        "remaining": max(0, limit - used),
+        "limit": limit_info.daily_max,
+        "remaining": max(0, limit_info.daily_max - used),
         "qualityScoreAvg": await _today_quality_avg(user_id),
     }
+
+
+async def _check_limit_and_create_transaction(
+    user_id: int,
+    quality_score: int,
+    request: "DetailedEarningsRequest",
+) -> dict:
+    """
+    한도 체크 + 트랜잭션 생성을 하나의 DB 트랜잭션으로 처리
+    
+    이 함수는 race condition을 방지하기 위해 모든 작업을
+    하나의 database.transaction() 블록 안에서 처리합니다.
+    
+    Returns:
+        dict: 생성된 트랜잭션 정보 및 한도 정보
+    """
+    async with database.transaction():
+        # 1) 오늘 사용량 조회 (모든 상태)
+        used_today = await _used_today_from_tx(user_id)
+        
+        # 2) (선택) 오늘 정산 완료 건수 (추후 확장용)
+        settled_today = await _settled_today_from_tx(user_id)
+        
+        # 3) 공통 모듈을 사용하여 오늘 한도 계산
+        limit_info: LimitInfo = calculate_dynamic_limit(
+            quality_score=quality_score,
+            settled_today=settled_today,
+        )
+        daily_limit = limit_info.daily_max
+        
+        # 4) 하드 캡 초과 여부 체크
+        # 5회까지 허용, 6회부터 차단 (current_used > daily_limit)
+        if used_today >= daily_limit:
+            # 한도 초과 → HTTPException 발생
+            print(f"❌ [LIMIT CHECK] User {user_id} exceeded limit: {used_today} >= {daily_limit}")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "DAILY_LIMIT_REACHED",
+                    "message": f"일일 제출 한도({daily_limit}회)를 초과했습니다. 현재 사용량: {used_today}회. 24시간 후 다시 시도해주세요.",
+                    "dailyLimit": daily_limit,
+                    "used": used_today,
+                    "qualityLevel": limit_info.level,
+                },
+            )
+        
+        print(f"✅ [LIMIT CHECK] User {user_id} passed limit check: {used_today} < {daily_limit}")
+        
+        # 5) 트랜잭션 생성 (PENDING_VERIFICATION 상태)
+        amount = request.amount
+        query = request.query or "광고 클릭 보상"
+        ad_type = request.adType or "unknown"
+        search_id = request.searchId or ""
+        bid_id = request.bidId or ""
+        
+        transaction_id = (
+            f"txn_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
+        )
+        
+        print(
+            f"📝 Registering trade for verification for user {user_id} (Count: {used_today+1}/{daily_limit})"
+        )
+        
+        await database.execute(
+            """
+            INSERT INTO transactions (
+                id, user_id, auction_id, bid_id, advertiser_id,
+                query_text, buyer_name, primary_reward, source,
+                status, ad_type, created_at, updated_at, search_id
+            )
+            VALUES (
+                :id, :user_id, :auction_id, :bid_id, :advertiser_id,
+                :query_text, :buyer_name, :primary_reward, :source,
+                'PENDING_VERIFICATION', :ad_type, NOW(), NOW(), :search_id
+            )
+            """,
+            {
+                "id": transaction_id,
+                "user_id": user_id,
+                "auction_id": request.auction_id,
+                "bid_id": bid_id,
+                "advertiser_id": request.advertiser_id,
+                "query_text": query,
+                "buyer_name": request.buyer_name or "시스템",
+                "primary_reward": amount,
+                "source": (request.source or "PLATFORM"),
+                "ad_type": ad_type,
+                "search_id": search_id,
+            },
+        )
+        
+        # 6) 반환 값: 프론트에서 쓸 수 있는 정보 포함
+        return {
+            "transaction_id": transaction_id,
+            "dailyLimit": daily_limit,
+            "used": used_today + 1,  # 방금 생성된 것까지 포함
+            "qualityLevel": limit_info.level,
+            "amount": amount,
+            "bid_id": bid_id,
+            "search_id": search_id,
+        }
 
 
 # JWT 인증 함수
@@ -694,7 +821,8 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         quality_score = current_user_data["quality_score"] if current_user_data else 75
 
         # 4. 트랜잭션 기준으로 일일 사용량 계산 (기존 daily_submissions 대신)
-        submission_limit = calculate_dynamic_limit(quality_score)
+        limit_info = calculate_dynamic_limit(quality_score)
+        submission_limit = SubmissionLimit(level=limit_info.level, dailyMax=limit_info.daily_max)
         daily_submission = await _remaining_from_tx(user_id, quality_score)
 
         # 5. 사용자별 거래 내역 조회 (광고주 이름 포함)
@@ -992,7 +1120,8 @@ async def update_daily_submission(
             if user_quality_score_record
             else 75
         )
-        submission_limit = calculate_dynamic_limit(current_quality_score)
+        limit_info = calculate_dynamic_limit(current_quality_score)
+        submission_limit = SubmissionLimit(level=limit_info.level, dailyMax=limit_info.daily_max)
 
         # 4. 최종적으로 남은 작업량을 계산하여 응답을 구성합니다.
         remaining = max(0, submission_limit.dailyMax - updated_count)
@@ -1258,7 +1387,6 @@ async def register_trade_for_verification(
     """
     user_id = current_user["id"]
     user_quality_score = current_user.get("quality_score", 75)
-    submission_limit = calculate_dynamic_limit(user_quality_score).dailyMax
 
     try:
         # 멱등성 체크: 동일한 (user_id, search_id, bid_id) 조합이 오늘 이미 존재하는지 확인
@@ -1276,7 +1404,7 @@ async def register_trade_for_verification(
 
         if existing:
             # 기존 트랜잭션이 있으면 그대로 반환 (멱등성)
-            daily_after = await _remaining_from_tx(user_id)
+            daily_after = await _remaining_from_tx(user_id, user_quality_score)
             print(f"🔄 Returning existing transaction for user {user_id} (idempotent)")
             return {
                 "success": True,
@@ -1288,82 +1416,32 @@ async def register_trade_for_verification(
                 "trade_id": existing["bid_id"],
             }
 
-        # 트랜잭션 기준으로 현재 사용량 확인
-        current_used = await _used_today_from_tx(user_id)
-
-        # 한도 초과 확인
-        if current_used >= submission_limit:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"일일 제출 한도({submission_limit}회)를 초과했습니다. 내일 다시 시도해주세요.",
-            )
-
-        # 신규 트랜잭션 생성
-        amount = request.amount
-        query = request.query or "광고 클릭 보상"
-        ad_type = request.adType or "unknown"
-        search_id = request.searchId or ""
-        bid_id = request.bidId or ""
-
-        print(
-            f"📝 Registering trade for verification for user {user_id} (Count: {current_used+1}/{submission_limit})"
+        # 한도 체크 + 트랜잭션 생성을 하나의 DB 트랜잭션으로 처리
+        # 이 함수 내부에서 사용량 조회 → 한도 계산 → 비교 → 트랜잭션 생성이 모두 처리됨
+        result = await _check_limit_and_create_transaction(
+            user_id=user_id,
+            quality_score=user_quality_score,
+            request=request,
         )
-
-        transaction_id = (
-            f"txn_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
-        )
-
-        # DB 작업을 트랜잭션으로 묶어 데이터 정합성을 보장
-        async with database.transaction():
-            # 1. transactions 테이블에 'PENDING_VERIFICATION' 상태로 저장 (auction_id/advertiser_id 포함)
-            await database.execute(
-                """
-                INSERT INTO transactions (
-                    id, user_id, auction_id, bid_id, advertiser_id,
-                    query_text, buyer_name, primary_reward, source,
-                    status, ad_type, created_at, updated_at, search_id
-                )
-                VALUES (
-                    :id, :user_id, :auction_id, :bid_id, :advertiser_id,
-                    :query_text, :buyer_name, :primary_reward, :source,
-                    'PENDING_VERIFICATION', :ad_type, NOW(), NOW(), :search_id
-                )
-                """,
-                {
-                    "id": transaction_id,
-                    "user_id": user_id,
-                    "auction_id": request.auction_id,
-                    "bid_id": bid_id,
-                    "advertiser_id": request.advertiser_id,
-                    "query_text": query,
-                    "buyer_name": request.buyer_name or "시스템",
-                    "primary_reward": amount,
-                    "source": (request.source or "PLATFORM"),
-                    "ad_type": ad_type,
-                    "search_id": search_id,
-                },
-            )
-            # 2. 사용자 잔고 업데이트 로직 제거됨 - Settlement Service에서만 처리
-            # 이제 이 함수는 거래만 PENDING 상태로 등록하고, 실제 적립은 Settlement Service에서 처리
 
         # 생성된 트랜잭션 조회
         created_transaction = await database.fetch_one(
             "SELECT * FROM transactions WHERE id = :transaction_id",
-            {"transaction_id": transaction_id},
+            {"transaction_id": result["transaction_id"]},
         )
 
         # 트랜잭션 기준으로 업데이트된 사용량 계산
-        daily_after = await _remaining_from_tx(user_id)
+        daily_after = await _remaining_from_tx(user_id, user_quality_score)
 
-        print(f"✅ Successfully registered trade for verification: {transaction_id}")
+        print(f"✅ Successfully registered trade for verification: {result['transaction_id']}")
         return {
             "success": True,
             "message": "거래가 등록되었으며, SLA 검증 대기 중입니다.",
             "transaction": dict(created_transaction) if created_transaction else None,
             "user_id": user_id,
-            "amount": amount,
+            "amount": result["amount"],
             "dailySubmission": daily_after,
-            "trade_id": bid_id,  # 프론트엔드가 SLA 검증 요청에 사용할 ID
+            "trade_id": result["bid_id"],  # 프론트엔드가 SLA 검증 요청에 사용할 ID
         }
 
     except HTTPException as http_exc:

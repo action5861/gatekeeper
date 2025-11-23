@@ -2222,6 +2222,7 @@ async def get_settlement_receipt(
             ),
             "transaction_id": settlement_data["transaction_id"],
             "user_id": anonymized_user_id,
+            "advertiser_id": advertiser_id,  # 광고주 ID 추가
             "primary_reward": (
                 float(settlement_data["primary_reward"])
                 if settlement_data["primary_reward"]

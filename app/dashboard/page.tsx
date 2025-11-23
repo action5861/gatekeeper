@@ -84,6 +84,7 @@ export default function Dashboard() {
                 successRate={summary?.successRate ?? 0}
                 avgQualityScore={summary?.avgQualityScore ?? 0}
                 totalEarnings={summary?.totalEarnings ?? 0}
+                onWithdrawalSuccess={refetch}
               />
             </ErrorBoundary>
           </div>

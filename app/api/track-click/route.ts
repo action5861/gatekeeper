@@ -48,8 +48,36 @@ export async function POST(request: NextRequest) {
             } else {
                 console.warn('⚠️ User service unavailable, using default limits')
             }
-            if (dailySubmission.remaining <= 0) {
-                return NextResponse.json({ success: false, error: `일일 제출 한도(${dailySubmission.limit}회) 소진` }, { status: 429 })
+            // 한도 체크: 5회까지 허용, 6회부터 차단 (count > limit이면 차단)
+            // 70점 이상 사용자는 추가 10회 제출 가능 (총 15회)
+            if (dailySubmission.count > dailySubmission.limit) {
+                // 70점 이상 사용자의 경우 추가 제출 가능 여부 확인
+                const qualityScore = dailySubmission.qualityScoreAvg || 0
+                const bonusLimit = qualityScore >= 70 ? dailySubmission.limit + 10 : dailySubmission.limit
+                
+                if (qualityScore >= 70 && dailySubmission.count <= bonusLimit) {
+                    // 추가 제출 가능 - 계속 진행
+                    console.log(`✅ [TRACK-CLICK] User with quality_score ${qualityScore} can use bonus submission: ${dailySubmission.count}/${bonusLimit}`)
+                    // 한도 체크를 통과하고 계속 진행
+                } else if (qualityScore >= 70 && dailySubmission.count > bonusLimit) {
+                    // 추가 제출 한도도 초과
+                    console.log(`❌ [TRACK-CLICK] Daily limit exceeded (with bonus): ${dailySubmission.count} > ${bonusLimit}`)
+                    return NextResponse.json({ 
+                        success: false, 
+                        error: `일일 제출 한도(기본 ${dailySubmission.limit}회 + 추가 10회 = 총 ${bonusLimit}회)를 초과했습니다. 현재 사용량: ${dailySubmission.count}회. 24시간 후 다시 시도해주세요.`,
+                        canUseBonus: false
+                    }, { status: 429 })
+                } else {
+                    // 70점 미만이거나 이미 추가 제출 한도까지 사용한 경우
+                    console.log(`❌ [TRACK-CLICK] Daily limit exceeded: ${dailySubmission.count} > ${dailySubmission.limit}`)
+                    return NextResponse.json({ 
+                        success: false, 
+                        error: qualityScore >= 70 
+                            ? `일일 제출 한도(${dailySubmission.limit}회)를 초과했습니다. 현재 사용량: ${dailySubmission.count}회. 품질 점수가 70점 이상이시므로 추가 10회 제출이 가능합니다. (총 ${bonusLimit}회)`
+                            : `일일 제출 한도(${dailySubmission.limit}회)를 초과했습니다. 현재 사용량: ${dailySubmission.count}회. 24시간 후 다시 시도해주세요.`,
+                        canUseBonus: qualityScore >= 70
+                    }, { status: 429 })
+                }
             }
         } catch (e) {
             console.warn('⚠️ Failed to check daily submission limit:', e)
