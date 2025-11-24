@@ -1,15 +1,29 @@
 'use client'
 
-import { CheckCircle, Clock, DollarSign, Target, XCircle } from 'lucide-react'
+import SettlementReceipt from '@/components/advertiser/SettlementReceipt'
+import { CheckCircle, Clock, DollarSign, FileText, Target, XCircle } from 'lucide-react'
+import { useState } from 'react'
+
+interface SettlementInfo {
+    decision: string
+    settled_amount: number
+    v_atf: number
+    clicked: boolean
+    t_dwell_on_ad_site: number
+    trade_id?: string
+    transaction_id?: string
+}
 
 interface Bid {
     id: string
+    bidId?: string
     auctionId: string
     amount: number
     timestamp: string
     status: 'active' | 'won' | 'lost' | 'pending'
     highestBid?: number
     myBid: number
+    settlement?: SettlementInfo | null
 }
 
 interface MyBidsProps {
@@ -17,6 +31,9 @@ interface MyBidsProps {
 }
 
 export default function MyBids({ recentBids }: MyBidsProps) {
+    const [selectedBidId, setSelectedBidId] = useState<string | null>(null)
+    const [isReceiptOpen, setIsReceiptOpen] = useState(false)
+
     if (!recentBids) {
         return (
             <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-6 animate-fadeInUp">
@@ -25,6 +42,16 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                 </div>
             </div>
         )
+    }
+
+    const handleViewReceipt = (bidId: string) => {
+        setSelectedBidId(bidId)
+        setIsReceiptOpen(true)
+    }
+
+    const handleCloseReceipt = () => {
+        setIsReceiptOpen(false)
+        setSelectedBidId(null)
     }
 
     const getStatusIcon = (status: string) => {
@@ -70,9 +97,9 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                 </div>
             ) : (
                 <div className="space-y-4">
-                    {recentBids.slice(0, 5).map((bid) => (
+                    {recentBids.slice(0, 5).map((bid, index) => (
                         <div
-                            key={bid.id}
+                            key={`${bid.id}-${bid.timestamp}-${index}`}
                             className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 hover:border-slate-500 transition-all duration-200"
                         >
                             <div className="flex items-center justify-between mb-3">
@@ -94,17 +121,25 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                                 </div>
                                 <div>
                                     <p className="text-xs text-slate-400">My Bid</p>
-                                    <p className="text-sm font-bold text-slate-100">₩{bid.myBid.toLocaleString()}</p>
+                                    <p className="text-sm font-bold text-slate-100">{bid.myBid.toLocaleString()}P</p>
                                 </div>
                                 {bid.highestBid && (
                                     <div>
                                         <p className="text-xs text-slate-400">Highest Bid</p>
-                                        <p className="text-sm font-medium text-slate-200">₩{bid.highestBid.toLocaleString()}</p>
+                                        <p className="text-sm font-medium text-slate-200">{bid.highestBid.toLocaleString()}P</p>
                                     </div>
                                 )}
                                 <div>
-                                    <p className="text-xs text-slate-400">Amount</p>
-                                    <p className="text-sm font-medium text-slate-200">₩{bid.amount.toLocaleString()}</p>
+                                    <p className="text-xs text-slate-400">
+                                        {bid.settlement
+                                            ? '정산 금액'
+                                            : 'Amount'}
+                                    </p>
+                                    <p className="text-sm font-medium text-slate-200">
+                                        {bid.settlement
+                                            ? bid.settlement.settled_amount.toLocaleString()
+                                            : bid.amount.toLocaleString()}P
+                                    </p>
                                 </div>
                             </div>
 
@@ -123,6 +158,26 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                                     </div>
                                 </div>
                             </div>
+
+                            {/* Settlement Receipt Button - won 상태이거나 정산 정보가 있으면 표시 */}
+                            {(() => {
+                                const statusLower = bid.status?.toLowerCase() || '';
+                                const hasSettlement = bid.settlement !== null && bid.settlement !== undefined;
+                                // won 상태이거나 정산 정보가 있으면 버튼 표시
+                                return statusLower === 'won' || hasSettlement;
+                            })() && (
+                                    <div className="mt-3 pt-3 border-t border-slate-600">
+                                        <button
+                                            onClick={() => handleViewReceipt(bid.bidId || bid.id)}
+                                            className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg transition-colors"
+                                        >
+                                            <FileText className="w-4 h-4 text-blue-400" />
+                                            <span className="text-sm font-medium text-blue-400">
+                                                {bid.settlement ? '정산 영수증 보기' : '정산 영수증 조회'}
+                                            </span>
+                                        </button>
+                                    </div>
+                                )}
                         </div>
                     ))}
                 </div>
@@ -135,6 +190,15 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                         View All Bids ({recentBids.length})
                     </button>
                 </div>
+            )}
+
+            {/* Settlement Receipt Modal */}
+            {selectedBidId && isReceiptOpen && (
+                <SettlementReceipt
+                    bidId={selectedBidId}
+                    isOpen={isReceiptOpen}
+                    onClose={handleCloseReceipt}
+                />
             )}
         </div>
     )

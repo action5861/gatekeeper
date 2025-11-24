@@ -1,6 +1,7 @@
 'use client'
 
-import { DollarSign, Settings, Target, TrendingUp } from 'lucide-react'
+import Link from 'next/link'
+import { ArrowRight, DollarSign, Settings, Target, TrendingUp } from 'lucide-react'
 
 interface BudgetStatusProps {
     additionalStats?: {
@@ -71,7 +72,7 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                         </div>
                         <div>
                             <p className="text-sm text-slate-400">Daily Budget</p>
-                            <p className="text-lg font-bold text-slate-100">₩{additionalStats.dailyBudget.toLocaleString()}</p>
+                            <p className="text-lg font-bold text-slate-100">{additionalStats.dailyBudget.toLocaleString()}P</p>
                         </div>
                     </div>
                 </div>
@@ -84,7 +85,7 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                         </div>
                         <div>
                             <p className="text-sm text-slate-400">Today Spent</p>
-                            <p className="text-lg font-bold text-slate-100">₩{additionalStats.todaySpent.toLocaleString()}</p>
+                            <p className="text-lg font-bold text-slate-100">{additionalStats.todaySpent.toLocaleString()}P</p>
                         </div>
                     </div>
                 </div>
@@ -105,8 +106,8 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                     ></div>
                 </div>
                 <div className="flex justify-between text-xs text-slate-500 mt-1">
-                    <span>₩0</span>
-                    <span>₩{additionalStats.dailyBudget.toLocaleString()}</span>
+                    <span>0P</span>
+                    <span>{additionalStats.dailyBudget.toLocaleString()}P</span>
                 </div>
             </div>
 
@@ -115,7 +116,7 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                 <div className="flex items-center justify-between">
                     <div>
                         <p className="text-sm text-slate-400">Remaining Budget</p>
-                        <p className="text-xl font-bold text-green-400">₩{additionalStats.remainingBudget.toLocaleString()}</p>
+                        <p className="text-xl font-bold text-green-400">{additionalStats.remainingBudget.toLocaleString()}P</p>
                     </div>
                     <div className="w-12 h-12 bg-gradient-to-r from-green-500 to-blue-500 rounded-xl flex items-center justify-center">
                         <DollarSign className="w-6 h-6 text-white" />
@@ -133,7 +134,7 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                         </div>
                         <div>
                             <p className="text-sm text-slate-400">Max Bid</p>
-                            <p className="text-lg font-bold text-slate-100">₩{additionalStats.maxBidPerKeyword.toLocaleString()}</p>
+                            <p className="text-lg font-bold text-slate-100">{additionalStats.maxBidPerKeyword.toLocaleString()}P</p>
                         </div>
                     </div>
                 </div>
@@ -150,6 +151,17 @@ export default function BudgetStatus({ additionalStats }: BudgetStatusProps) {
                         </div>
                     </div>
                 </div>
+            </div>
+
+            {/* Manage Auto Bidding CTA */}
+            <div className="mt-6">
+                <Link
+                    href="/advertiser/auto-bidding"
+                    className="group inline-flex w-full items-center justify-between rounded-xl bg-blue-600/90 px-5 py-3 text-base font-semibold text-white transition-all duration-200 hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+                >
+                    <span>자동 입찰 설정 관리하기</span>
+                    <ArrowRight className="h-5 w-5 transition-transform duration-200 group-hover:translate-x-1" />
+                </Link>
             </div>
         </div>
     )

@@ -18,6 +18,16 @@ from database import (
     disconnect_from_database,
 )
 import json
+import sys
+from pathlib import Path
+
+# 공통 한도 정책 모듈 import
+# services 디렉토리를 Python 경로에 추가
+services_path = Path(__file__).parent.parent
+if str(services_path) not in sys.path:
+    sys.path.insert(0, str(services_path))
+
+from shared.limit_policy import calculate_dynamic_limit, LimitInfo
 
 app = FastAPI(title="User Service", version="1.0.0")
 
@@ -209,6 +219,13 @@ class DetailedEarningsRequest(BaseModel):
     adType: Optional[str] = Field(None, description="Ad type (bidded/fallback)")
     searchId: Optional[str] = Field(None, max_length=100, description="Search ID")
     bidId: Optional[str] = Field(None, max_length=100, description="Bid ID")
+    # 추가 필드
+    auction_id: Optional[int] = Field(None, description="Auction row id")
+    advertiser_id: Optional[int] = Field(None, description="Advertiser id")
+    source: Optional[str] = Field(
+        None, description="Source of bid (ADVERTISER/PLATFORM)"
+    )
+    buyer_name: Optional[str] = Field(None, description="Buyer display name")
 
     @validator("query")
     def validate_query(cls, v):
@@ -336,24 +353,40 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
-def calculate_dynamic_limit(quality_score: int) -> SubmissionLimit:
-    """일일 제출 한도를 환경 변수에서 가져옵니다."""
-    # 환경 변수에서 일일 한도 가져오기 (기본값: 5)
-    daily_limit = int(os.getenv("DEFAULT_DAILY_LIMIT", "5"))
-    # 모든 사용자에게 동일하게 하루 제출 한도 제공
-    # 추후 quality_score에 따라 동적으로 변경 가능
-    return SubmissionLimit(level="Standard", dailyMax=daily_limit)
+# calculate_dynamic_limit 함수는 이제 shared.limit_policy에서 import하여 사용
+# 기존 함수는 제거하고 공통 모듈 사용
 
 
 # 🔥 새로운 헬퍼 함수들 - 트랜잭션 기준으로 통일
 async def _used_today_from_tx(user_id: int) -> int:
-    """오늘 생성된 트랜잭션 수를 기준으로 사용량 계산"""
+    """
+    오늘 생성된 트랜잭션 수를 기준으로 사용량 계산
+    상태 무관: PENDING_VERIFICATION, SETTLED, FAILED 모두 포함
+    """
     row = await database.fetch_one(
         """
         SELECT COUNT(*) AS c
         FROM transactions
         WHERE user_id = :uid
           AND created_at::date = CURRENT_DATE
+        """,
+        {"uid": user_id},
+    )
+    return int(row["c"] or 0) if row else 0
+
+
+async def _settled_today_from_tx(user_id: int) -> int:
+    """
+    오늘 정산 완료된 트랜잭션 수 계산
+    추후 보너스 한도 정책에 활용 가능
+    """
+    row = await database.fetch_one(
+        """
+        SELECT COUNT(*) AS c
+        FROM transactions
+        WHERE user_id = :uid
+          AND created_at::date = CURRENT_DATE
+          AND status = 'SETTLED'
         """,
         {"uid": user_id},
     )
@@ -376,14 +409,115 @@ async def _today_quality_avg(user_id: int) -> int:
 
 async def _remaining_from_tx(user_id: int, quality_score: int = 0) -> dict:
     """트랜잭션 기준으로 남은 사용량 계산"""
-    limit = calculate_dynamic_limit(quality_score).dailyMax
+    limit_info = calculate_dynamic_limit(quality_score)
     used = await _used_today_from_tx(user_id)
     return {
         "count": used,
-        "limit": limit,
-        "remaining": max(0, limit - used),
+        "limit": limit_info.daily_max,
+        "remaining": max(0, limit_info.daily_max - used),
         "qualityScoreAvg": await _today_quality_avg(user_id),
     }
+
+
+async def _check_limit_and_create_transaction(
+    user_id: int,
+    quality_score: int,
+    request: "DetailedEarningsRequest",
+) -> dict:
+    """
+    한도 체크 + 트랜잭션 생성을 하나의 DB 트랜잭션으로 처리
+    
+    이 함수는 race condition을 방지하기 위해 모든 작업을
+    하나의 database.transaction() 블록 안에서 처리합니다.
+    
+    Returns:
+        dict: 생성된 트랜잭션 정보 및 한도 정보
+    """
+    async with database.transaction():
+        # 1) 오늘 사용량 조회 (모든 상태)
+        used_today = await _used_today_from_tx(user_id)
+        
+        # 2) (선택) 오늘 정산 완료 건수 (추후 확장용)
+        settled_today = await _settled_today_from_tx(user_id)
+        
+        # 3) 공통 모듈을 사용하여 오늘 한도 계산
+        limit_info: LimitInfo = calculate_dynamic_limit(
+            quality_score=quality_score,
+            settled_today=settled_today,
+        )
+        daily_limit = limit_info.daily_max
+        
+        # 4) 하드 캡 초과 여부 체크
+        # 5회까지 허용, 6회부터 차단 (current_used > daily_limit)
+        if used_today >= daily_limit:
+            # 한도 초과 → HTTPException 발생
+            print(f"❌ [LIMIT CHECK] User {user_id} exceeded limit: {used_today} >= {daily_limit}")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "code": "DAILY_LIMIT_REACHED",
+                    "message": f"일일 제출 한도({daily_limit}회)를 초과했습니다. 현재 사용량: {used_today}회. 24시간 후 다시 시도해주세요.",
+                    "dailyLimit": daily_limit,
+                    "used": used_today,
+                    "qualityLevel": limit_info.level,
+                },
+            )
+        
+        print(f"✅ [LIMIT CHECK] User {user_id} passed limit check: {used_today} < {daily_limit}")
+        
+        # 5) 트랜잭션 생성 (PENDING_VERIFICATION 상태)
+        amount = request.amount
+        query = request.query or "광고 클릭 보상"
+        ad_type = request.adType or "unknown"
+        search_id = request.searchId or ""
+        bid_id = request.bidId or ""
+        
+        transaction_id = (
+            f"txn_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
+        )
+        
+        print(
+            f"📝 Registering trade for verification for user {user_id} (Count: {used_today+1}/{daily_limit})"
+        )
+        
+        await database.execute(
+            """
+            INSERT INTO transactions (
+                id, user_id, auction_id, bid_id, advertiser_id,
+                query_text, buyer_name, primary_reward, source,
+                status, ad_type, created_at, updated_at, search_id
+            )
+            VALUES (
+                :id, :user_id, :auction_id, :bid_id, :advertiser_id,
+                :query_text, :buyer_name, :primary_reward, :source,
+                'PENDING_VERIFICATION', :ad_type, NOW(), NOW(), :search_id
+            )
+            """,
+            {
+                "id": transaction_id,
+                "user_id": user_id,
+                "auction_id": request.auction_id,
+                "bid_id": bid_id,
+                "advertiser_id": request.advertiser_id,
+                "query_text": query,
+                "buyer_name": request.buyer_name or "시스템",
+                "primary_reward": amount,
+                "source": (request.source or "PLATFORM"),
+                "ad_type": ad_type,
+                "search_id": search_id,
+            },
+        )
+        
+        # 6) 반환 값: 프론트에서 쓸 수 있는 정보 포함
+        return {
+            "transaction_id": transaction_id,
+            "dailyLimit": daily_limit,
+            "used": used_today + 1,  # 방금 생성된 것까지 포함
+            "qualityLevel": limit_info.level,
+            "amount": amount,
+            "bid_id": bid_id,
+            "search_id": search_id,
+        }
 
 
 # JWT 인증 함수
@@ -528,7 +662,17 @@ async def login_for_access_token(form_data: UserLogin):
         print("🎫 Creating access token...")
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user["email"]}, expires_delta=access_token_expires
+            data={
+                "sub": user["email"],
+                "user_id": user["id"],
+                "username": (
+                    user["username"]
+                    if "username" in user
+                    else user["email"].split("@")[0]
+                ),
+                "userType": "user",
+            },
+            expires_delta=access_token_expires,
         )
         print("✅ Login successful")
         return {"access_token": access_token, "token_type": "bearer"}
@@ -545,40 +689,48 @@ async def login_for_access_token(form_data: UserLogin):
 @app.get("/dashboard", response_model=DashboardResponse)
 async def get_dashboard(current_user: dict = Depends(get_current_user)):
     """🔥 JWT에서 실제 사용자 ID 추출하여 개인화 대시보드 제공"""
+    user_id: Optional[int] = None
     try:
-        user_id = current_user["id"]  # 🚨 하드코딩 완전 제거!
+        user_id = int(current_user["id"])  # 🚨 하드코딩 완전 제거!
         print(
             f"🎯 Dashboard request for REAL user ID: {user_id} (email: {current_user['email']})"
         )
 
         # 1. 실제 사용자별 수익 계산 (이번달, 지난달, 전체)
+        # ⭐ 중요: SETTLED 상태의 거래만 수익으로 계산 (PENDING_VERIFICATION 제외)
         earnings_query = """
         SELECT 
-            -- 전체 수익
-            COALESCE(SUM(primary_reward), 0) as primary_total,
-            COALESCE(SUM(secondary_reward), 0) as secondary_total,
-            COALESCE(SUM(primary_reward), 0) + COALESCE(SUM(secondary_reward), 0) as total,
+            -- 전체 수익 (정산 완료된 거래만)
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN primary_reward ELSE 0 END), 0) as primary_total,
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN secondary_reward ELSE 0 END), 0) as secondary_total,
+            COALESCE(SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as total,
             
-            -- 이번달 수익
+            -- 이번달 수익 (정산 완료된 거래만)
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward ELSE 0 END), 0) as this_month_primary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN secondary_reward ELSE 0 END), 0) as this_month_secondary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE) 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as this_month_total,
             
-            -- 지난달 수익
+            -- 지난달 수익 (정산 완료된 거래만)
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward ELSE 0 END), 0) as last_month_primary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN secondary_reward ELSE 0 END), 0) as last_month_secondary,
             COALESCE(SUM(CASE 
                 WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month') 
+                AND status IN ('SETTLED', '1차 완료', '2차 완료')
                 THEN primary_reward + COALESCE(secondary_reward, 0) ELSE 0 END), 0) as last_month_total
         FROM transactions 
         WHERE user_id = :user_id
@@ -669,18 +821,28 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         quality_score = current_user_data["quality_score"] if current_user_data else 75
 
         # 4. 트랜잭션 기준으로 일일 사용량 계산 (기존 daily_submissions 대신)
-        submission_limit = calculate_dynamic_limit(quality_score)
+        limit_info = calculate_dynamic_limit(quality_score)
+        submission_limit = SubmissionLimit(level=limit_info.level, dailyMax=limit_info.daily_max)
         daily_submission = await _remaining_from_tx(user_id, quality_score)
 
-        # 5. 사용자별 거래 내역 조회
+        # 5. 사용자별 거래 내역 조회 (광고주 이름 포함)
         transactions = await database.fetch_all(
             """
-            SELECT id, query_text as query, buyer_name as "buyerName", 
-                   primary_reward as "primaryReward", secondary_reward as "secondaryReward",
-                   status, created_at as timestamp
-            FROM transactions 
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
+            SELECT 
+                t.id,
+                t.query_text as query,
+                COALESCE(a.company_name, t.buyer_name) as "buyerName",
+                t.primary_reward as "primaryReward",
+                t.secondary_reward as "secondaryReward",
+                t.status,
+                t.created_at as timestamp,
+                t.source,
+                t.advertiser_id
+            FROM transactions t
+            LEFT JOIN bids b ON t.bid_id = b.id
+            LEFT JOIN advertisers a ON b.advertiser_id = a.id
+            WHERE t.user_id = :user_id
+            ORDER BY t.created_at DESC
             """,
             {"user_id": user_id},
         )
@@ -799,8 +961,17 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
             transactions=[
                 {
                     "id": row["id"],
-                    "query": row["query"],
-                    "buyerName": row["buyerName"],
+                    # 광고주 매칭이 안될 때는 항상 검색어를 노출
+                    "query": row["query"] or "",
+                    # Buyer: 광고주 매칭 실패(PLATFORM 또는 advertiser_id null) 시 Intendex로 표기 (대소문자 무시)
+                    "buyerName": (
+                        "Intendex"
+                        if (
+                            row["advertiser_id"] is None
+                            or str(row["source"] or "").upper() == "PLATFORM"
+                        )
+                        else row["buyerName"]
+                    ),
                     "primaryReward": int(row["primaryReward"]),
                     "secondaryReward": (
                         int(row["secondaryReward"]) if row["secondaryReward"] else None
@@ -822,7 +993,8 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         return response_data
 
     except Exception as e:
-        print(f"❌ Dashboard error for user {user_id}: {e}")
+        safe_user_id = user_id if user_id is not None else "unknown"
+        print(f"❌ Dashboard error for user {safe_user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Dashboard error: {str(e)}")
 
 
@@ -831,8 +1003,9 @@ async def update_quality_score(
     request: QualityScoreRequest, current_user: dict = Depends(get_current_user)
 ):
     """품질 점수 업데이트 및 이력 저장"""
+    user_id: Optional[int] = None
     try:
-        user_id = current_user["id"]
+        user_id = int(current_user["id"])
         score = request.score
         week_label = request.week_label
 
@@ -867,7 +1040,8 @@ async def update_quality_score(
         }
 
     except Exception as e:
-        print(f"❌ Quality score update error for user {user_id}: {e}")
+        safe_user_id = user_id if user_id is not None else "unknown"
+        print(f"❌ Quality score update error for user {safe_user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -946,7 +1120,8 @@ async def update_daily_submission(
             if user_quality_score_record
             else 75
         )
-        submission_limit = calculate_dynamic_limit(current_quality_score)
+        limit_info = calculate_dynamic_limit(current_quality_score)
+        submission_limit = SubmissionLimit(level=limit_info.level, dailyMax=limit_info.daily_max)
 
         # 4. 최종적으로 남은 작업량을 계산하여 응답을 구성합니다.
         remaining = max(0, submission_limit.dailyMax - updated_count)
@@ -992,8 +1167,9 @@ async def search_completed(
     request: SearchCompletedRequest, current_user: dict = Depends(get_current_user)
 ):
     """검색 완료 시 데이터 저장 (제출 횟수 카운트 제외)"""
+    user_id: Optional[int] = None
     try:
-        user_id = current_user["id"]
+        user_id = int(current_user["id"])
 
         print(f"🔍 Search completed for user {user_id} (Data logging only)")
         print(f"   Query: {request.query}")
@@ -1049,7 +1225,8 @@ async def search_completed(
         }
 
     except Exception as e:
-        print(f"❌ Search completed error for user {user_id}: {e}")
+        safe_user_id = user_id if user_id is not None else "unknown"
+        print(f"❌ Search completed error for user {safe_user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1058,8 +1235,9 @@ async def auction_completed(
     request: AuctionCompletedRequest, current_user: dict = Depends(get_current_user)
 ):
     """경매 완료 시 상태 업데이트 및 거래 내역 생성"""
+    user_id: Optional[int] = None
     try:
-        user_id = current_user["id"]
+        user_id = int(current_user["id"])
 
         print(f"🏆 Auction completed for user {user_id}: {request.search_id}")
 
@@ -1080,7 +1258,7 @@ async def auction_completed(
         # 2. 선택된 입찰 정보 가져오기
         bid_info = await database.fetch_one(
             """
-            SELECT buyer_name, price, bonus_description, landing_url
+            SELECT buyer_name, price, bonus_description, landing_url, advertiser_id
             FROM bids 
             WHERE id = :bid_id
             """,
@@ -1092,43 +1270,40 @@ async def auction_completed(
                 status_code=404, detail="선택된 입찰 정보를 찾을 수 없습니다."
             )
 
-        # 3. 거래 내역 생성
+        # 3. 거래 내역 생성 (PENDING_VERIFICATION 상태로만 등록)
         transaction_id = f"TXN_{request.search_id}_{int(datetime.now().timestamp())}"
 
         await database.execute(
             """
             INSERT INTO transactions (
-                id, user_id, auction_id, query_text, buyer_name, 
+                id, user_id, auction_id, bid_id, advertiser_id, query_text, buyer_name, 
                 primary_reward, status, created_at
             )
             VALUES (
                 :transaction_id, :user_id, 
                 (SELECT id FROM auctions WHERE search_id = :search_id),
+                :bid_id, :advertiser_id,
                 (SELECT query_text FROM auctions WHERE search_id = :search_id),
-                :buyer_name, :primary_reward, '1차 완료', CURRENT_TIMESTAMP
+                :buyer_name, :primary_reward, 'PENDING_VERIFICATION', CURRENT_TIMESTAMP
             )
             """,
             {
                 "transaction_id": transaction_id,
                 "user_id": user_id,
                 "search_id": request.search_id,
+                "bid_id": request.selected_bid_id,
+                "advertiser_id": (
+                    bid_info["advertiser_id"]
+                    if bid_info["advertiser_id"] is not None
+                    else None
+                ),
                 "buyer_name": bid_info["buyer_name"],
                 "primary_reward": request.reward_amount,
             },
         )
 
-        # 4. 사용자의 총 수익 업데이트
-        await database.execute(
-            """
-            UPDATE users 
-            SET total_earnings = total_earnings + :reward_amount 
-            WHERE id = :user_id
-            """,
-            {
-                "user_id": user_id,
-                "reward_amount": request.reward_amount,
-            },
-        )
+        # 4. 사용자 잔고 업데이트 로직 제거됨 - Settlement Service에서만 처리
+        # 이제 이 함수는 거래만 PENDING 상태로 등록하고, 실제 적립은 Settlement Service에서 처리
 
         print(f"✅ Auction completed and transaction created for user {user_id}")
         return {
@@ -1139,7 +1314,8 @@ async def auction_completed(
         }
 
     except Exception as e:
-        print(f"❌ Auction completed error for user {user_id}: {e}")
+        safe_user_id = user_id if user_id is not None else "unknown"
+        print(f"❌ Auction completed error for user {safe_user_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1197,19 +1373,20 @@ async def record_tx(body: TxRecord):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/user/earnings", status_code=201)
-async def create_user_earnings_api(
+@app.post("/api/user/earnings", status_code=202)
+async def register_trade_for_verification(
     request: DetailedEarningsRequest, current_user: dict = Depends(get_current_user)
 ):
     """
-    광고 클릭 시 수익을 생성합니다. (멱등성 보장, 트랜잭션 기준 사용량 계산)
+    광고 클릭 시 거래를 'SLA 검증 대기' 상태로 등록합니다.
+    - 멱등성을 보장하며, 일일 한도를 체크합니다.
+    - 이 함수는 더 이상 사용자 잔고를 직접 업데이트하지 않습니다.
     - 동일한 (user_id, search_id, bid_id) 조합이 있으면 기존 트랜잭션 반환
     - 일일 제출 한도를 초과하면 에러를 반환합니다.
     - 모든 DB 작업은 트랜잭션으로 처리됩니다.
     """
     user_id = current_user["id"]
     user_quality_score = current_user.get("quality_score", 75)
-    submission_limit = calculate_dynamic_limit(user_quality_score).dailyMax
 
     try:
         # 멱등성 체크: 동일한 (user_id, search_id, bid_id) 조합이 오늘 이미 존재하는지 확인
@@ -1227,90 +1404,44 @@ async def create_user_earnings_api(
 
         if existing:
             # 기존 트랜잭션이 있으면 그대로 반환 (멱등성)
-            daily_after = await _remaining_from_tx(user_id)
+            daily_after = await _remaining_from_tx(user_id, user_quality_score)
             print(f"🔄 Returning existing transaction for user {user_id} (idempotent)")
             return {
                 "success": True,
-                "message": "기존 트랜잭션을 반환합니다(멱등).",
+                "message": "거래가 이미 등록되어 있으며, SLA 검증 대기 중입니다.",
                 "transaction": dict(existing),
                 "user_id": user_id,
                 "amount": existing["primary_reward"],
                 "dailySubmission": daily_after,
+                "trade_id": existing["bid_id"],
             }
 
-        # 트랜잭션 기준으로 현재 사용량 확인
-        current_used = await _used_today_from_tx(user_id)
-
-        # 한도 초과 확인
-        if current_used >= submission_limit:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"일일 제출 한도({submission_limit}회)를 초과했습니다. 내일 다시 시도해주세요.",
-            )
-
-        # 신규 트랜잭션 생성
-        amount = request.amount
-        query = request.query or "광고 클릭 보상"
-        ad_type = request.adType or "unknown"
-        search_id = request.searchId or ""
-        bid_id = request.bidId or ""
-
-        print(
-            f"💰 Creating new earnings for user {user_id} (Count: {current_used+1}/{submission_limit})"
+        # 한도 체크 + 트랜잭션 생성을 하나의 DB 트랜잭션으로 처리
+        # 이 함수 내부에서 사용량 조회 → 한도 계산 → 비교 → 트랜잭션 생성이 모두 처리됨
+        result = await _check_limit_and_create_transaction(
+            user_id=user_id,
+            quality_score=user_quality_score,
+            request=request,
         )
-
-        transaction_id = (
-            f"txn_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
-        )
-
-        # DB 작업을 트랜잭션으로 묶어 데이터 정합성을 보장
-        async with database.transaction():
-            await database.execute(
-                """
-                INSERT INTO transactions (
-                    id, user_id, query_text, buyer_name, primary_reward, status, 
-                    source, search_id, bid_id, ad_type
-                )
-                VALUES (
-                    :id, :user_id, :query_text, :buyer_name, :primary_reward, '1차 완료', 
-                    'PLATFORM', :search_id, :bid_id, :ad_type
-                )
-                """,
-                {
-                    "id": transaction_id,
-                    "user_id": user_id,
-                    "query_text": query,
-                    "buyer_name": "시스템",
-                    "primary_reward": amount,
-                    "search_id": search_id,
-                    "bid_id": bid_id,
-                    "ad_type": ad_type,
-                },
-            )
-
-            # 사용자의 총 수익 업데이트
-            await database.execute(
-                "UPDATE users SET total_earnings = total_earnings + :amount WHERE id = :user_id",
-                {"amount": amount, "user_id": user_id},
-            )
 
         # 생성된 트랜잭션 조회
         created_transaction = await database.fetch_one(
             "SELECT * FROM transactions WHERE id = :transaction_id",
-            {"transaction_id": transaction_id},
+            {"transaction_id": result["transaction_id"]},
         )
 
         # 트랜잭션 기준으로 업데이트된 사용량 계산
-        daily_after = await _remaining_from_tx(user_id)
+        daily_after = await _remaining_from_tx(user_id, user_quality_score)
 
-        print(f"✅ Successfully processed earnings transaction: {transaction_id}")
+        print(f"✅ Successfully registered trade for verification: {result['transaction_id']}")
         return {
             "success": True,
-            "message": "수익이 성공적으로 기록되었습니다.",
+            "message": "거래가 등록되었으며, SLA 검증 대기 중입니다.",
             "transaction": dict(created_transaction) if created_transaction else None,
             "user_id": user_id,
-            "amount": amount,
+            "amount": result["amount"],
             "dailySubmission": daily_after,
+            "trade_id": result["bid_id"],  # 프론트엔드가 SLA 검증 요청에 사용할 ID
         }
 
     except HTTPException as http_exc:
@@ -1319,14 +1450,210 @@ async def create_user_earnings_api(
         raise http_exc
     except Exception as e:
         # 그 외 모든 예외는 서버 오류로 처리
-        print(f"❌ Critical error in /api/user/earnings for user {user_id}: {e}")
+        print(
+            f"❌ Critical error in register_trade_for_verification for user {user_id}: {e}"
+        )
         import traceback
 
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"수익 기록 중 서버 오류가 발생했습니다: {str(e)}",
+            detail=f"거래 등록 중 서버 오류가 발생했습니다: {str(e)}",
         )
+
+
+# [LIVE] Dashboard metrics endpoints
+@app.get("/dashboard/summary")
+async def get_dashboard_summary(current_user: dict = Depends(get_current_user)):
+    """대시보드 요약 정보 - 평균 품질 점수, 성공률, 오늘의 입찰/보상 정보"""
+    user_id = current_user["id"]
+
+    try:
+        # Avg Quality Score (최근 30일)
+        avg_quality = await database.fetch_one(
+            """
+            SELECT ROUND(AVG(quality_score)::numeric, 2) AS avg_q
+            FROM search_queries
+            WHERE user_id = :uid AND created_at >= (NOW() AT TIME ZONE 'Asia/Seoul') - INTERVAL '30 days'
+        """,
+            {"uid": user_id},
+        )
+        avg_quality_score = (
+            float(avg_quality["avg_q"])
+            if avg_quality and avg_quality["avg_q"] is not None
+            else 0.0
+        )
+
+        # Success Rate (최근 30일; 성공 정의: 거래가 완료된 경우)
+        sr = await database.fetch_one(
+            """
+            SELECT 
+              CASE WHEN COUNT(*)=0 THEN 0 
+                   ELSE ROUND((SUM(CASE WHEN status IN ('SETTLED', '1차 완료', '2차 완료') THEN 1 ELSE 0 END)::numeric / COUNT(*)) * 100, 2) END AS success_rate
+            FROM transactions
+            WHERE user_id = :uid AND created_at >= (NOW() AT TIME ZONE 'Asia/Seoul') - INTERVAL '30 days'
+        """,
+            {"uid": user_id},
+        )
+        success_rate = float(sr["success_rate"]) if sr else 0.0
+
+        # Transaction Summary (오늘)
+        trx = await database.fetch_one(
+            """
+            SELECT 
+              COALESCE(SUM(primary_reward),0) AS today_bid_value,
+              COUNT(*) AS today_bids
+            FROM transactions
+            WHERE user_id = :uid 
+              AND created_at >= (date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
+        """,
+            {"uid": user_id},
+        )
+
+        # Earnings(오늘) – 정산 완료(SETTLED)의 secondary_reward 합계만 집계
+        rewards_row = await database.fetch_one(
+            """
+            SELECT COALESCE(SUM(COALESCE(secondary_reward, 0)),0) AS today_rewards
+            FROM transactions
+            WHERE user_id = :uid
+              AND status = 'SETTLED'
+              AND created_at >= (date_trunc('day', timezone('Asia/Seoul', now())) AT TIME ZONE 'Asia/Seoul')
+        """,
+            {"uid": user_id},
+        )
+
+        # 전체 수익 – 정산 완료(SETTLED)의 secondary_reward만 누적
+        total_earnings = await database.fetch_one(
+            """
+            SELECT COALESCE(SUM(COALESCE(secondary_reward, 0)),0) AS total_earnings
+            FROM transactions
+            WHERE user_id = :uid AND status = 'SETTLED'
+        """,
+            {"uid": user_id},
+        )
+
+        return {
+            "avgQualityScore": avg_quality_score,
+            "successRate": success_rate,  # %
+            "totalEarnings": (
+                int(total_earnings["total_earnings"]) if total_earnings else 0
+            ),
+            "today": {
+                "bids": int(trx["today_bids"]) if trx else 0,
+                "bidValue": int(trx["today_bid_value"]) if trx else 0,
+                "rewards": int(rewards_row["today_rewards"]) if rewards_row else 0,
+            },
+        }
+    except Exception as e:
+        print(f"❌ Dashboard summary error for user {user_id}: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Dashboard summary error: {str(e)}"
+        )
+
+
+@app.get("/dashboard/quality-history")
+async def get_quality_history(current_user: dict = Depends(get_current_user)):
+    """품질 이력 데이터 - 최근 14일 일자별 평균 품질"""
+    user_id = current_user["id"]
+
+    try:
+        # 최근 14일 일자별 평균 품질
+        rows = await database.fetch_all(
+            """
+            SELECT to_char((created_at AT TIME ZONE 'Asia/Seoul')::date, 'YYYY-MM-DD') AS day,
+                   ROUND(AVG(quality_score)::numeric, 2) AS avg_quality,
+                   COUNT(*) AS cnt
+            FROM search_queries
+            WHERE user_id = :uid
+              AND created_at >= (NOW() AT TIME ZONE 'Asia/Seoul') - INTERVAL '14 days'
+            GROUP BY 1
+            ORDER BY 1
+        """,
+            {"uid": user_id},
+        )
+        return {
+            "series": [
+                {
+                    "date": r["day"],
+                    "avg": float(r["avg_quality"]),
+                    "count": int(r["cnt"]),
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        print(f"❌ Quality history error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Quality history error: {str(e)}")
+
+
+@app.get("/dashboard/transactions")
+async def get_transactions(current_user: dict = Depends(get_current_user)):
+    """거래 내역 - 최근 50개 트랜잭션"""
+    user_id = current_user["id"]
+
+    try:
+        # 최근 50개 트랜잭션 (transactions 기준)
+        rows = await database.fetch_all(
+            """
+            SELECT id, query_text, buyer_name, primary_reward, secondary_reward, status, created_at
+            FROM transactions
+            WHERE user_id = :uid
+            ORDER BY created_at DESC
+            LIMIT 50
+        """,
+            {"uid": user_id},
+        )
+        return {
+            "items": [
+                {
+                    "id": r["id"],
+                    "query": r["query_text"],
+                    "buyerName": r["buyer_name"],
+                    "primaryReward": int(r["primary_reward"]),
+                    "secondaryReward": (
+                        int(r["secondary_reward"]) if r["secondary_reward"] else None
+                    ),
+                    "status": r["status"],
+                    "timestamp": (
+                        (r["created_at"]).isoformat() if r["created_at"] else None
+                    ),
+                }
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        print(f"❌ Transactions error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Transactions error: {str(e)}")
+
+
+@app.get("/dashboard/realtime")
+async def get_realtime(current_user: dict = Depends(get_current_user)):
+    """실시간 통계 - 최근 24시간 활동"""
+    user_id = current_user["id"]
+
+    try:
+        # 최근 24시간의 활동 (UTC 시간 기준)
+        rows = await database.fetch_one(
+            """
+            WITH q AS (
+              SELECT COUNT(*) AS q_cnt
+              FROM search_queries
+              WHERE user_id = :uid AND created_at >= NOW() - INTERVAL '24 hours'
+            ), b AS (
+              SELECT COUNT(*) AS b_cnt
+              FROM transactions
+              WHERE user_id = :uid AND created_at >= NOW() - INTERVAL '24 hours'
+            )
+            SELECT q.q_cnt, b.b_cnt FROM q CROSS JOIN b
+        """,
+            {"uid": user_id},
+        )
+        q_cnt = int(rows["q_cnt"]) if rows and rows["q_cnt"] is not None else 0
+        b_cnt = int(rows["b_cnt"]) if rows and rows["b_cnt"] is not None else 0
+        return {"recentQueries": q_cnt, "recentBids": b_cnt}
+    except Exception as e:
+        print(f"❌ Realtime stats error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Realtime stats error: {str(e)}")
 
 
 @app.get("/health")

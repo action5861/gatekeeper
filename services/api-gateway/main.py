@@ -121,6 +121,7 @@ SERVICE_URLS = {
     "advertiser": os.getenv("ADVERTISER_SERVICE_URL", "http://localhost:8007"),
     "auction": os.getenv("AUCTION_SERVICE_URL", "http://localhost:8002"),
     "payment": os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8003"),
+    "settlement": os.getenv("SETTLEMENT_SERVICE_URL", "http://localhost:8008"),
     "quality": os.getenv("QUALITY_SERVICE_URL", "http://localhost:8006"),
     "analysis": os.getenv("ANALYSIS_SERVICE_URL", "http://localhost:8001"),
     "verification": os.getenv("VERIFICATION_SERVICE_URL", "http://localhost:8004"),
@@ -286,9 +287,43 @@ async def proxy_request(
 @app.post("/api/auth/register")
 async def register_user(request: Request):
     body = await request.json()
-    return await proxy_request(
-        "user", "/register", "POST", data=body, auth_required=False, request=request
-    )
+
+    # Check if this is an advertiser registration
+    if body.get("userType") == "advertiser":
+        # Transform the data for advertiser service
+        import re
+
+        email_username = body["email"].replace("@", "_at_")
+        email_username = re.sub(r"[^a-zA-Z0-9_가-힣]", "_", email_username)
+
+        # Convert categories to numeric if they are strings
+        business_setup = body.get("businessSetup", {})
+        categories = business_setup.get("categories", [])
+        numeric_categories = [int(c) if isinstance(c, str) else c for c in categories]
+
+        transformed_body = {
+            "username": email_username,
+            "email": body["email"],
+            "password": body["password"],
+            "company_name": body["companyName"],
+            "business_setup": {
+                **business_setup,
+                "categories": numeric_categories,
+            },
+        }
+
+        return await proxy_request(
+            "advertiser",
+            "/register",
+            "POST",
+            data=transformed_body,
+            auth_required=False,
+            request=request,
+        )
+    else:
+        return await proxy_request(
+            "user", "/register", "POST", data=body, auth_required=False, request=request
+        )
 
 
 @app.post("/api/auth/login")
@@ -358,6 +393,33 @@ async def login_advertiser(request: Request):
 async def get_advertiser_dashboard(request: Request):
     return await proxy_request(
         "advertiser", "/dashboard", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/advertiser/status", dependencies=[Depends(verify_token)])
+async def get_advertiser_status(request: Request):
+    return await proxy_request(
+        "advertiser", "/status", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/advertiser/ai-suggestions", dependencies=[Depends(verify_token)])
+async def get_ai_suggestions(request: Request):
+    return await proxy_request(
+        "advertiser", "/ai-suggestions", "GET", auth_required=True, request=request
+    )
+
+
+@app.post("/api/advertiser/confirm-suggestions", dependencies=[Depends(verify_token)])
+async def confirm_suggestions(request: Request):
+    body = await request.json()
+    return await proxy_request(
+        "advertiser",
+        "/confirm-suggestions",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
     )
 
 
@@ -524,6 +586,153 @@ async def claim_reward(request: Request):
     body = await request.json()
     return await proxy_request(
         "verification", "/claim", "POST", data=body, auth_required=True, request=request
+    )
+
+
+@app.post("/api/verification/verify-delivery", dependencies=[Depends(verify_token)])
+async def verify_delivery(request: Request):
+    """SLA 검증 요청을 Verification Service로 전달"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/verify-delivery",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
+    )
+
+
+@app.post("/api/verification/update-pending-return")
+async def update_pending_return(request: Request):
+    """1차 평가: PENDING_RETURN 상태 업데이트 (내부 서비스간 통신용)"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/update-pending-return",
+        "POST",
+        data=body,
+        auth_required=False,  # 서비스간 통신
+        request=request,
+    )
+
+
+@app.post("/api/verification/verify-return", dependencies=[Depends(verify_token)])
+async def verify_return(request: Request):
+    """2차 평가: 사용자 복귀 시 체류 시간 기반 최종 평가"""
+    body = await request.json()
+    return await proxy_request(
+        "verification",
+        "/verify-return",
+        "POST",
+        data=body,
+        auth_required=True,
+        request=request,
+    )
+
+
+# Settlement Service
+@app.post("/api/settlement/settle-trade")
+async def settle_trade(request: Request):
+    """정산 요청을 Settlement Service로 전달 (내부 서비스간 통신용)"""
+    body = await request.json()
+    return await proxy_request(
+        "settlement",
+        "/settle-trade",
+        "POST",
+        data=body,
+        auth_required=False,  # 서비스간 통신
+        request=request,
+    )
+
+
+# [LIVE] Dashboard metrics endpoints
+from fastapi import APIRouter, Depends, HTTPException
+from jose import jwt, JWTError
+from databases import Database
+from datetime import datetime, timedelta, timezone
+
+
+# Database connection (assuming it's available)
+async def get_db():
+    # This should be replaced with actual database connection
+    # For now, we'll use the existing proxy pattern
+    pass
+
+
+KST = timezone(timedelta(hours=9))
+
+
+def get_user_id_from_token(auth_header: str) -> int:
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    token = auth_header.split(" ")[1]
+    try:
+        payload = jwt.get_unverified_claims(token)
+        # 토큰에 포함된 user_id/email 등 프로젝트 규격에 맞춰 수정
+        return int(payload.get("user_id") or payload.get("sub_id") or 1)
+    except JWTError:  # 필요 시 검증용 키 적용
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# [LIVE] 테이블 존재 체크
+async def has_table(db: Database, table: str) -> bool:
+    row = await db.fetch_one(
+        """
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema='public' AND table_name=:t
+      ) AS ok
+    """,
+        {"t": table},
+    )
+    return bool(row and row["ok"])
+
+
+@app.get("/api/dashboard/summary")
+async def get_dashboard_summary(request: Request):
+    """대시보드 요약 정보 - 평균 품질 점수, 성공률, 오늘의 입찰/보상 정보"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    user_id = get_user_id_from_token(auth_header)
+
+    # User service로 프록시 (실제 DB 쿼리는 user service에서 처리)
+    return await proxy_request(
+        "user", "/dashboard/summary", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/quality-history")
+async def get_quality_history(request: Request):
+    """품질 이력 데이터 - 최근 14일 일자별 평균 품질"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/quality-history", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/transactions")
+async def get_transactions(request: Request):
+    """거래 내역 - 최근 50개 트랜잭션"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/transactions", "GET", auth_required=True, request=request
+    )
+
+
+@app.get("/api/dashboard/realtime")
+async def get_realtime(request: Request):
+    """실시간 통계 - 최근 10분 활동"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    return await proxy_request(
+        "user", "/dashboard/realtime", "GET", auth_required=True, request=request
     )
 
 

@@ -70,7 +70,7 @@ export default function BiddingSummary({ biddingSummary }: BiddingSummaryProps) 
                         </div>
                         <div>
                             <p className="text-sm text-slate-400">Total Spent</p>
-                            <p className="text-2xl font-bold text-slate-100">₩{biddingSummary.totalSpent.toLocaleString()}</p>
+                            <p className="text-2xl font-bold text-slate-100">{biddingSummary.totalSpent.toLocaleString()}P</p>
                         </div>
                     </div>
                 </div>
@@ -94,7 +94,7 @@ export default function BiddingSummary({ biddingSummary }: BiddingSummaryProps) 
                 <div className="flex items-center justify-between">
                     <div>
                         <p className="text-sm text-slate-400">Average Bid Amount</p>
-                        <p className="text-xl font-bold text-slate-100">₩{biddingSummary.averageBidAmount.toLocaleString()}</p>
+                        <p className="text-xl font-bold text-slate-100">{biddingSummary.averageBidAmount.toLocaleString()}P</p>
                     </div>
                     <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-green-500 rounded-xl flex items-center justify-center">
                         <DollarSign className="w-6 h-6 text-white" />

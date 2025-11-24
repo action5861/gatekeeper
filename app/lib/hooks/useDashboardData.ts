@@ -1,225 +1,192 @@
-'use client'
-
-import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRouter } from 'next/navigation';
-import { useEffect } from 'react';
-
-interface DashboardData {
-    earnings: {
-        total: number;
-        primary: number;
-        secondary: number;
-        thisMonth: {
-            total: number;
-            primary: number;
-            secondary: number;
-        };
-        lastMonth: {
-            total: number;
-            primary: number;
-            secondary: number;
-        };
-        growth: {
-            percentage: string;
-            isPositive: boolean;
-        };
-    };
-    qualityHistory: Array<{
-        name: string;
-        score: number;
-    }>;
-    qualityStats: {
-        average: number;
-        max: number;
-        min: number;
-        growth: {
-            percentage: string;
-            isPositive: boolean;
-        };
-        recentScore: number;
-    };
-    submissionLimit: {
-        level: 'Excellent' | 'Good' | 'Average' | 'Needs Improvement';
-        dailyMax: number;
-    };
-    dailySubmission: {
-        count: number;
-        limit: number;
-        remaining: number;
-        qualityScoreAvg: number;
-    };
-    stats: {
-        monthlySearches: number;
-        successRate: number;
-        avgQualityScore: number;
-    };
-    transactions: any[];
-}
-
-const fetchDashboardData = async (): Promise<DashboardData> => {
-    try {
-        const response = await authenticatedFetch('/api/user/dashboard')
-        return response.json()
-    } catch (error) {
-        if (error instanceof Error && error.message.includes('로그인이 만료')) {
-            handleTokenExpiry()
-            throw new Error('Authentication failed')
-        }
-        throw error
-    }
-}
+// [LIVE] useDashboardData – 실제 데이터 연동
+import { fetchQualityHistory, fetchRealtime, fetchSummary, fetchTransactions, type TransactionItem } from '@/lib/api/dashboard'
+import { useEffect, useState } from 'react'
 
 export function useDashboardData() {
-    const router = useRouter()
-    const queryClient = useQueryClient()
+    const [isLoading, setIsLoading] = useState(true)
+    const [error, setError] = useState<Error | null>(null)
 
-    const {
-        data: dashboardData,
-        isLoading,
-        error,
-        refetch,
-        isFetching,
-        isError,
-    } = useQuery({
-        queryKey: ['dashboard'],
-        queryFn: fetchDashboardData,
-        staleTime: 30000, // 30초 동안 데이터를 fresh로 간주
-        gcTime: 5 * 60 * 1000, // 5분 동안 캐시 유지
-        retry: (failureCount, error) => {
-            // 인증 에러는 재시도하지 않음
-            if (error instanceof Error && error.message.includes('Authentication failed')) {
-                return false
+    const [transactions, setTransactions] = useState<TransactionItem[] | null>(null)
+    const [summary, setSummary] = useState<null | {
+        avgQualityScore: number; successRate: number; totalEarnings: number; today: { bids: number; bidValue: number; rewards: number }
+    }>(null)
+    const [qualitySeries, setQualitySeries] = useState<null | { date: string; avg: number; count: number }[]>(null)
+    const [realtime, setRealtime] = useState<{ recentQueries: number; recentBids: number } | null>(null)
+
+    useEffect(() => {
+        let mounted = true
+        ; (async () => {
+            try {
+                if (typeof window !== 'undefined') {
+                    const userType = localStorage.getItem('userType')
+                    if (userType === 'advertiser') {
+                        if (mounted) {
+                            setIsLoading(false)
+                            setError(new Error('advertiser_redirect'))
+                        }
+                        return
+                    }
+                }
+
+                const [s, q, t, r] = await Promise.all([
+                    fetchSummary(),
+                    fetchQualityHistory(),
+                    fetchTransactions(),
+                    fetchRealtime(),
+                ])
+                if (!mounted) return
+                setSummary(s)
+                setQualitySeries(q)
+                setTransactions(t)
+                setRealtime(r)
+            } catch (e: any) {
+                if (mounted) setError(e instanceof Error ? e : new Error(String(e)))
+            } finally {
+                if (mounted) setIsLoading(false)
             }
-            // 네트워크 에러는 최대 3번 재시도
-            return failureCount < 3
-        },
-        retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
-    })
+        })()
+        return () => { mounted = false }
+    }, [])
 
-    // 인증 에러 시 로그인 페이지로 리다이렉트
-    useEffect(() => {
-        if (error instanceof Error && error.message.includes('Authentication failed')) {
-            router.push('/login')
+    // 데이터 새로고침 함수 추가
+    const refetch = () => {
+        if (typeof window !== 'undefined' && localStorage.getItem('userType') === 'advertiser') {
+            setError(new Error('advertiser_redirect'))
+            setIsLoading(false)
+            return
         }
-    }, [error, router])
 
-    // 실시간 업데이트를 위한 백그라운드 리페칭
-    useEffect(() => {
-        const interval = setInterval(() => {
-            if (!isLoading && !isError) {
-                queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+        setIsLoading(true)
+        setError(null)
+        ; (async () => {
+            try {
+                const [s, q, t, r] = await Promise.all([
+                    fetchSummary(),
+                    fetchQualityHistory(),
+                    fetchTransactions(),
+                    fetchRealtime(),
+                ])
+                setSummary(s)
+                setQualitySeries(q)
+                setTransactions(t)
+                setRealtime(r)
+            } catch (e: any) {
+                setError(e instanceof Error ? e : new Error(String(e)))
+            } finally {
+                setIsLoading(false)
             }
-        }, 30000) // 30초마다 백그라운드에서 데이터 갱신
-
-        return () => clearInterval(interval)
-    }, [queryClient, isLoading, isError])
-
-    // 탭 포커스 시 데이터 갱신
-    useEffect(() => {
-        const handleFocus = () => {
-            if (!isLoading && !isError) {
-                queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-            }
-        }
-
-        window.addEventListener('focus', handleFocus)
-        return () => window.removeEventListener('focus', handleFocus)
-    }, [queryClient, isLoading, isError])
-
-    // 커스텀 이벤트 리스너
-    useEffect(() => {
-        const handleStatsUpdate = () => {
-            queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-        }
-
-        window.addEventListener('stats-updated', handleStatsUpdate)
-        window.addEventListener('reward-updated', handleStatsUpdate)
-        window.addEventListener('quality-updated', handleStatsUpdate)
-        window.addEventListener('submission-updated', handleStatsUpdate)
-
-        return () => {
-            window.removeEventListener('stats-updated', handleStatsUpdate)
-            window.removeEventListener('reward-updated', handleStatsUpdate)
-            window.removeEventListener('quality-updated', handleStatsUpdate)
-            window.removeEventListener('submission-updated', handleStatsUpdate)
-        }
-    }, [queryClient])
-
-    return {
-        dashboardData,
-        isLoading,
-        error,
-        refetch,
-        isFetching,
-        isError,
+        })()
     }
+
+    return { isLoading, error, transactions, summary, qualitySeries, realtime, refetch }
 }
 
 // 개별 섹션별 데이터 추출 훅들
 export function useEarningsData() {
-    const { dashboardData, isLoading, error, refetch, isFetching, isError } = useDashboardData()
+    const { summary, isLoading, error } = useDashboardData()
 
     return {
-        earnings: dashboardData?.earnings,
+        earnings: summary ? {
+            total: summary.today.rewards,
+            primary: summary.today.rewards,
+            secondary: 0,
+            thisMonth: {
+                total: summary.today.rewards,
+                primary: summary.today.rewards,
+                secondary: 0,
+            },
+            lastMonth: {
+                total: 0,
+                primary: 0,
+                secondary: 0,
+            },
+            growth: {
+                percentage: "N/A",
+                isPositive: true,
+            },
+        } : null,
         isLoading,
         error,
-        refetch,
-        isFetching,
-        isError,
+        refetch: () => { },
+        isFetching: false,
+        isError: !!error,
     }
 }
 
 export function useQualityData() {
-    const { dashboardData, isLoading, error, refetch, isFetching, isError } = useDashboardData()
+    const { qualitySeries, summary, isLoading, error } = useDashboardData()
 
     return {
-        qualityHistory: dashboardData?.qualityHistory,
-        qualityStats: dashboardData?.qualityStats,
+        qualityHistory: qualitySeries ? qualitySeries.map(item => ({
+            name: item.date,
+            score: item.avg
+        })) : [],
+        qualityStats: summary ? {
+            average: summary.avgQualityScore,
+            max: summary.avgQualityScore,
+            min: summary.avgQualityScore,
+            growth: {
+                percentage: "N/A",
+                isPositive: true,
+            },
+            recentScore: summary.avgQualityScore,
+        } : null,
         isLoading,
         error,
-        refetch,
-        isFetching,
-        isError,
+        refetch: () => { },
+        isFetching: false,
+        isError: !!error,
     }
 }
 
 export function useSubmissionData() {
-    const { dashboardData, isLoading, error, refetch, isFetching, isError } = useDashboardData()
+    const { summary, isLoading, error } = useDashboardData()
 
     return {
-        submissionLimit: dashboardData?.submissionLimit,
-        dailySubmission: dashboardData?.dailySubmission,
+        submissionLimit: {
+            level: 'Standard' as const,
+            dailyMax: 5,
+        },
+        dailySubmission: summary ? {
+            count: summary.today.bids,
+            limit: 5,
+            remaining: Math.max(0, 5 - summary.today.bids),
+            qualityScoreAvg: summary.avgQualityScore,
+        } : null,
         isLoading,
         error,
-        refetch,
-        isFetching,
-        isError,
+        refetch: () => { },
+        isFetching: false,
+        isError: !!error,
     }
 }
 
 export function useStatsData() {
-    const { dashboardData, isLoading, error, refetch, isFetching, isError } = useDashboardData()
+    const { summary, realtime, isLoading, error } = useDashboardData()
 
     return {
-        stats: dashboardData?.stats,
+        stats: summary && realtime ? {
+            monthlySearches: realtime.recentQueries,
+            successRate: summary.successRate,
+            avgQualityScore: summary.avgQualityScore,
+        } : null,
         isLoading,
         error,
-        refetch,
-        isFetching,
-        isError,
+        refetch: () => { },
+        isFetching: false,
+        isError: !!error,
     }
 }
 
 export function useTransactionData() {
-    const { dashboardData, isLoading, error, refetch, isFetching, isError } = useDashboardData()
+    const { transactions, isLoading, error } = useDashboardData()
 
     return {
-        transactions: dashboardData?.transactions,
+        transactions,
         isLoading,
         error,
-        refetch,
-        isFetching,
-        isError,
+        refetch: () => { },
+        isFetching: false,
+        isError: !!error,
     }
 } 

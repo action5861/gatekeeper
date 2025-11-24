@@ -36,10 +36,35 @@ export default function LoginPage() {
                 body: requestBody,
             })
 
-            const result = await response.json()
+            // 응답 본문을 안전하게 파싱
+            let result: any = {}
+            try {
+                const text = await response.text()
+                const contentType = response.headers.get('content-type')
+                
+                if (contentType && contentType.includes('application/json')) {
+                    try {
+                        result = JSON.parse(text)
+                    } catch (parseError) {
+                        console.error('Failed to parse JSON response:', parseError)
+                        console.error('Response text:', text.substring(0, 500))
+                        throw new Error(`Invalid response format: ${text.substring(0, 200) || 'Unknown error'}`)
+                    }
+                } else {
+                    console.error('Non-JSON response:', text.substring(0, 500))
+                    try {
+                        result = JSON.parse(text)
+                    } catch {
+                        throw new Error(text.substring(0, 200) || `Login failed with status ${response.status}`)
+                    }
+                }
+            } catch (readError) {
+                console.error('Failed to read response:', readError)
+                throw new Error(`Failed to read response: ${readError instanceof Error ? readError.message : 'Unknown error'}`)
+            }
 
             if (!response.ok) {
-                throw new Error(result.message || 'Login failed')
+                throw new Error(result.message || result.detail || 'Login failed')
             }
 
             // Validate response

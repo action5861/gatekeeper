@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Literal, Optional
 import random
 import asyncio
+import httpx
 from database import (
     database,
     connect_to_database,
@@ -72,6 +73,19 @@ class VerifyClickResponse(BaseModel):
     type: str
     payout: int
     destination: str
+
+
+class DeliveryMetricsPayload(BaseModel):
+    trade_id: str
+    v_atf: float = 0.0  # 부정 방지용
+    clicked: bool = False  # 광고 클릭 여부 (핵심!)
+    t_dwell_on_ad_site: float = 0.0  # 광고주 사이트 체류 시간 (가장 중요!)
+    # 아래는 deprecated (하위 호환용)
+    l_fp: float = 0.0
+    f_ratio: float = 0.0
+    t_dwell: float = 0.0
+    x_ok: bool = False
+    t_dwell_before_click: float = 0.0
 
 
 # OCR 및 외부 API 연동을 통한 검증 과정을 시뮬레이션
@@ -292,6 +306,240 @@ async def verify_click(request: VerifyClickRequest):
     except Exception as e:
         print(f"❌ Click verification error: {e}")
         raise HTTPException(status_code=500, detail=f"Verification error: {str(e)}")
+
+
+@app.post("/verify-delivery")
+async def verify_delivery_and_trigger_settlement(payload: DeliveryMetricsPayload):
+    """
+    SLA 지표를 받아 검증하고 Settlement Service로 전달합니다.
+    - delivery_metrics 테이블에 SLA 지표 저장
+    - SLA 판정 로직 실행
+    - Settlement Service에 판정 결과 전달
+    """
+    try:
+        print(f"📊 Verifying delivery metrics for trade_id: {payload.trade_id}")
+
+        # 1. 수신된 SLA 지표를 delivery_metrics 테이블에 저장 (중복 시 무시)
+        await database.execute(
+            """INSERT INTO delivery_metrics (trade_id, v_atf, clicked, t_dwell_on_ad_site)
+               VALUES (:trade_id, :v_atf, :clicked, :t_dwell_on_ad_site)
+               ON CONFLICT (trade_id) DO UPDATE
+               SET v_atf = EXCLUDED.v_atf, 
+                   clicked = EXCLUDED.clicked,
+                   t_dwell_on_ad_site = GREATEST(delivery_metrics.t_dwell_on_ad_site, EXCLUDED.t_dwell_on_ad_site)""",
+            values={
+                "trade_id": payload.trade_id,
+                "v_atf": payload.v_atf,
+                "clicked": payload.clicked,
+                "t_dwell_on_ad_site": payload.t_dwell_on_ad_site,
+            },
+        )
+        print(f"✅ Saved delivery metrics for trade_id: {payload.trade_id}")
+
+        # 2. 🎯 단순하고 합리적인 SLA 판정 로직
+        decision = "FAILED"
+
+        print(f"📊 Evaluating SLA for trade_id: {payload.trade_id}")
+        print(f"   - Clicked: {payload.clicked}")
+        print(f"   - v_atf: {payload.v_atf} (부정 방지용)")
+        print(f"   - t_dwell_on_ad_site: {payload.t_dwell_on_ad_site}s (핵심!)")
+
+        # 클릭 안함 = 무조건 FAILED
+        if not payload.clicked:
+            decision = "FAILED"
+            print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
+            print(f"   광고 클릭 안함")
+        # 화면에 안 보이는데 클릭 = 부정 의심 (봇)
+        elif payload.v_atf < 0.3:
+            decision = "FAILED"
+            print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
+            print(f"   부정 클릭 의심 (v_atf: {payload.v_atf} < 0.3)")
+        # 광고주 사이트 체류 시간으로 평가 (선형 보상 시스템)
+        elif payload.t_dwell_on_ad_site >= 20.0:
+            decision = "PASSED"
+            print(f"✅ SLA PASSED for trade_id: {payload.trade_id}")
+            print(
+                f"   광고 클릭 + 광고주 사이트 20초 이상 체류 ({payload.t_dwell_on_ad_site:.2f}s)"
+            )
+        elif payload.t_dwell_on_ad_site > 3.0:
+            decision = "PARTIAL"
+            print(f"⚠️ SLA PARTIAL for trade_id: {payload.trade_id}")
+            print(
+                f"   광고 클릭 + 광고주 사이트 3초 초과 체류 ({payload.t_dwell_on_ad_site:.2f}s, 3s < dwell < 20s)"
+            )
+        else:
+            # 클릭했지만 광고주 사이트 체류 시간이 3초 이하 = FAILED
+            decision = "FAILED"
+            print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
+            print(
+                f"   광고 클릭 O, 하지만 체류 시간 부족 ({payload.t_dwell_on_ad_site:.2f}s <= 3s)"
+            )
+
+        # 3. Settlement Service에 판정 결과 전달
+        settlement_service_url = os.getenv(
+            "SETTLEMENT_SERVICE_URL", "http://settlement-service:8003"
+        )
+        settlement_endpoint = f"{settlement_service_url}/settle-trade"
+
+        print(f"📤 Sending settlement request to: {settlement_endpoint}")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                settlement_endpoint,
+                json={
+                    "trade_id": payload.trade_id,
+                    "verification_decision": decision,
+                    "dwell_time": payload.t_dwell_on_ad_site,  # 직접 전달
+                    "metrics": payload.dict(),
+                },
+            )
+
+            if response.status_code == 200:
+                print(
+                    f"✅ Settlement request successful for trade_id: {payload.trade_id}"
+                )
+            else:
+                print(f"⚠️ Settlement request returned status {response.status_code}")
+
+        return {
+            "status": "processing",
+            "decision": decision,
+            "trade_id": payload.trade_id,
+            "message": f"SLA 검증 완료. 판정: {decision}",
+        }
+
+    except Exception as e:
+        print(f"❌ Error in verify_delivery: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, detail=f"SLA 검증 처리 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@app.post("/update-pending-return")
+async def update_pending_return(request: dict):
+    """1차 평가: 광고 클릭 시 PENDING_RETURN 상태로 업데이트"""
+    try:
+        trade_id = request.get("trade_id")
+        if not trade_id:
+            raise HTTPException(status_code=400, detail="trade_id is required")
+
+        print(
+            f"📝 [1st Evaluation] Updating to PENDING_RETURN for trade_id: {trade_id}"
+        )
+
+        # transactions 테이블의 상태를 PENDING_RETURN으로 업데이트
+        await database.execute(
+            """UPDATE transactions
+               SET status = 'PENDING_RETURN'
+               WHERE id = :trade_id""",
+            values={"trade_id": trade_id},
+        )
+
+        print(
+            f"✅ [1st Evaluation] Status updated to PENDING_RETURN for trade_id: {trade_id}"
+        )
+
+        return {
+            "status": "ok",
+            "decision": "PENDING_RETURN",
+            "message": "사용자 복귀 대기 중",
+        }
+    except Exception as e:
+        print(f"❌ Error in update_pending_return: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/verify-return")
+async def verify_return(request: dict):
+    """2차 평가: 사용자 복귀 시 체류 시간 기반 최종 평가"""
+    try:
+        trade_id = request.get("trade_id")
+        dwell_time = request.get("dwell_time", 0)
+
+        if not trade_id:
+            raise HTTPException(status_code=400, detail="trade_id is required")
+
+        print(f"🔙 [2nd Evaluation] User returned for trade_id: {trade_id}")
+        print(f"   Dwell time: {dwell_time:.2f}s")
+
+        # delivery_metrics 테이블에 체류 시간 저장
+        await database.execute(
+            """UPDATE delivery_metrics
+               SET t_dwell_on_ad_site = :dwell_time
+               WHERE trade_id = :trade_id""",
+            values={"trade_id": trade_id, "dwell_time": dwell_time},
+        )
+
+        # SLA 기준에 따라 판정 (선형 보상 시스템)
+        decision = "FAILED"
+
+        if dwell_time >= 20.0:
+            decision = "PASSED"
+            print(f"✅ [2nd Evaluation] PASSED - Dwell time >= 20s")
+        elif dwell_time > 3.0:
+            decision = "PARTIAL"
+            print(
+                f"⚠️ [2nd Evaluation] PARTIAL - Dwell time: {dwell_time:.2f}s (3s < dwell < 20s)"
+            )
+        else:
+            decision = "FAILED"  # 3초 이하는 보상 없음
+            print(
+                f"❌ [2nd Evaluation] FAILED - Dwell time too short: {dwell_time:.2f}s (<= 3s)"
+            )
+
+        # transactions 테이블 상태 업데이트
+        await database.execute(
+            """UPDATE transactions
+               SET status = :status
+               WHERE id = :trade_id""",
+            values={"trade_id": trade_id, "status": decision},
+        )
+
+        # Settlement Service에 판정 결과 전달
+        settlement_service_url = os.getenv(
+            "SETTLEMENT_SERVICE_URL", "http://settlement-service:8003"
+        )
+        settlement_endpoint = f"{settlement_service_url}/settle-trade"
+
+        print(f"📤 Sending settlement request to: {settlement_endpoint}")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                settlement_endpoint,
+                json={
+                    "trade_id": trade_id,
+                    "verification_decision": decision,
+                    "dwell_time": dwell_time,
+                    "metrics": {
+                        "t_dwell": dwell_time,
+                        "t_dwell_on_ad_site": dwell_time,
+                        "dwell_time": dwell_time,  # 추가 필드명
+                    },
+                },
+            )
+
+            if response.status_code == 200:
+                print(f"✅ Settlement request successful for trade_id: {trade_id}")
+            else:
+                print(f"⚠️ Settlement request returned status {response.status_code}")
+
+        return {
+            "status": "completed",
+            "decision": decision,
+            "trade_id": trade_id,
+            "dwell_time": dwell_time,
+            "message": f"2차 평가 완료. 판정: {decision}",
+        }
+
+    except Exception as e:
+        print(f"❌ Error in verify_return: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")

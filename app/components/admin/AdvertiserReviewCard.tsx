@@ -2,7 +2,7 @@
 
 import { Building2, Calendar, CheckCircle, Globe, XCircle } from 'lucide-react'
 import { useState } from 'react'
-import CategorySelector from './CategorySelector'
+import CategoryDisplay from './CategoryDisplay'
 import KeywordEditor from './KeywordEditor'
 import WebsitePreview from './WebsitePreview'
 
@@ -15,7 +15,7 @@ interface AdvertiserReviewData {
     daily_budget: number
     created_at: string
     keywords: string[]
-    categories: number[]
+    categories: string[]  // AI 분석 결과는 path 문자열 배열
     review_status: string
     review_notes?: string
     recommended_bid_min: number
@@ -25,7 +25,7 @@ interface AdvertiserReviewData {
 interface AdvertiserReviewCardProps {
     advertiser: AdvertiserReviewData
     onReviewUpdate: (advertiserId: number, status: 'approved' | 'rejected', notes: string, bidRange: { min: number; max: number }) => void
-    onDataUpdate: (advertiserId: number, keywords: string[], categories: number[]) => void
+    onDataUpdate: (advertiserId: number, keywords: string[], categories: string[]) => void
 }
 
 export default function AdvertiserReviewCard({
@@ -159,7 +159,7 @@ export default function AdvertiserReviewCard({
                             />
                         </div>
                         <div>
-                            <CategorySelector
+                            <CategoryDisplay
                                 categories={editingCategories}
                                 onCategoriesChange={setEditingCategories}
                                 maxCategories={5}

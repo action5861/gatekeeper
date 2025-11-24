@@ -16,7 +16,7 @@ interface AdvertiserReviewData {
     daily_budget: number
     created_at: string
     keywords: string[]
-    categories: number[]
+    categories: string[]  // AI 분석 결과는 path 문자열 배열
     review_status: string
     review_notes?: string
     recommended_bid_min: number
@@ -257,7 +257,7 @@ export default function AdminAdvertiserReviewPage() {
     const handleDataUpdate = async (
         advertiserId: number,
         keywords: string[],
-        categories: number[]
+        categories: string[]
     ) => {
         try {
             if (typeof window === 'undefined') return

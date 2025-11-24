@@ -1,6 +1,7 @@
 // Step 1: 실시간 품질 평가 API (사용자 타이핑 시)
 // 일일 제출 한도 차감 없음, 분당 호출 제한만 적용
 
+import { verifyUserAuth } from '@/lib/auth';
 import { ApiResponse } from '@/lib/types';
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -38,13 +39,16 @@ export async function POST(request: NextRequest) {
         console.log(`🔍 [EVALUATE-QUALITY] Received request for query: "${query}"`);
 
         // 사용자 인증 확인
-        const authHeader = request.headers.get('authorization');
-        if (!authHeader) {
+        const user = await verifyUserAuth(request);
+        if (!user) {
+            console.log('❌ [EVALUATE-QUALITY] Authentication failed - no valid user token');
             return NextResponse.json<ApiResponse<null>>({
                 success: false,
-                error: '인증이 필요합니다.'
+                error: '인증이 필요합니다. 로그인 후 다시 시도해주세요.'
             }, { status: 401 });
         }
+
+        console.log(`✅ [EVALUATE-QUALITY] Authenticated user: ${user.username} (ID: ${user.id})`);
 
         // 검색어 유효성 검사
         if (!query || typeof query !== 'string' || query.trim().length === 0) {
@@ -74,18 +78,25 @@ export async function POST(request: NextRequest) {
             }, { status: 429 });
         }
 
-        // Analysis service에 직접 접근 (인증 우회)
+        // Analysis service에 직접 접근 (사용자 인증 정보 포함)
         const ANALYSIS_SERVICE_URL = process.env.ANALYSIS_SERVICE_URL || 'http://localhost:8001';
+        const userId = parseInt(user.id, 10); // JWT 토큰의 sub는 보통 문자열이므로 숫자로 변환
+        const requestBody = {
+            query: query.trim(),
+            user_id: userId
+        };
         console.log(`🔍 Calling analysis service directly: ${ANALYSIS_SERVICE_URL}/evaluate`);
+        console.log(`🔍 Request body:`, JSON.stringify(requestBody));
         const gatewayResponse = await fetch(`${ANALYSIS_SERVICE_URL}/evaluate`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ query: query.trim() }),
+            body: JSON.stringify(requestBody),
         });
 
         console.log(`📊 Analysis service response status: ${gatewayResponse.status}`);
+        console.log(`📊 Analysis service response headers:`, Object.fromEntries(gatewayResponse.headers.entries()));
 
         if (!gatewayResponse.ok) {
             let errorMessage = 'Analysis service error';
@@ -145,9 +156,21 @@ export async function POST(request: NextRequest) {
             }, { status: 200 });
         }
 
+        // 오류 메시지를 안전하게 처리
+        let errorMessage = '알 수 없는 오류';
+        if (error instanceof Error) {
+            errorMessage = error.message;
+        } else if (typeof error === 'object' && error !== null) {
+            errorMessage = JSON.stringify(error);
+        } else if (typeof error === 'string') {
+            errorMessage = error;
+        }
+
+        console.error('Quality Evaluation API Error Details:', error);
+
         return NextResponse.json<ApiResponse<null>>({
             success: false,
-            error: `서버 오류가 발생했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`
+            error: `서버 오류가 발생했습니다: ${errorMessage}`
         }, { status: 500 });
     }
 }

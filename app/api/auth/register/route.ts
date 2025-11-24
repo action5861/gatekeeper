@@ -3,18 +3,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
 // 1. 백엔드 Pydantic 모델과 거의 동일한 Zod 스키마 정의
+// AI 온보딩: websiteUrl만 필수, 나머지는 선택적 (AI가 자동 생성)
 const BusinessSetupSchema = z.object({
     websiteUrl: z.string().url({ message: "올바른 URL 형식이 아닙니다." }).max(500),
-    keywords: z.array(z.string().max(50, { message: "키워드는 50자를 초과할 수 없습니다." })).max(100),
-    categories: z.array(z.union([z.number(), z.string()])).max(50),
-    dailyBudget: z.number().int().min(1000).max(10_000_000),
+    keywords: z.array(z.string().max(50, { message: "키워드는 50자를 초과할 수 없습니다." })).max(100).optional(),
+    categories: z.array(z.union([z.number(), z.string()])).max(50).optional(),
+    dailyBudget: z.number().int().min(1000).max(10_000_000).optional(),
     bidRange: z.object({
         min: z.number().int().min(50).max(10_000),
         max: z.number().int().min(50).max(10_000),
     }).refine(data => data.max > data.min, {
         message: "최대 입찰가는 최소 입찰가보다 커야 합니다.",
         path: ["max"], // 오류가 발생한 필드를 특정
-    }),
+    }).optional(),
 });
 
 // 기본 스키마 (모든 사용자 타입에 공통)
@@ -59,7 +60,7 @@ export async function POST(req: NextRequest) {
 
         if (clientData.userType === 'advertiser') {
             // 광고주인 경우
-            const numericCategories = clientData.businessSetup.categories.map(c =>
+            const numericCategories = clientData.businessSetup.categories?.map(c =>
                 typeof c === 'string' ? parseInt(c, 10) : c
             );
 
@@ -70,7 +71,7 @@ export async function POST(req: NextRequest) {
                 company_name: clientData.companyName,
                 business_setup: {
                     ...clientData.businessSetup,
-                    categories: numericCategories,
+                    ...(numericCategories && { categories: numericCategories }),
                 },
             };
         } else {

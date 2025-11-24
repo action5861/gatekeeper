@@ -1,34 +1,42 @@
+# services/analysis-service/main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Literal
-import re
-import random
-from database import (
-    database,
-    SearchQuery,
-    User,
-    UserQualityHistory,
-    connect_to_database,
-    disconnect_from_database,
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+import json
+import asyncio
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from database import database, connect_to_database, disconnect_from_database
+from ai_analyzer import (
+    analyze_query_with_ai,
+    generate_improved_queries,
+    AiAnalysisReport,
+)
+from legacy_analyzer import (
+    evaluate_data_value as evaluate_data_value_legacy,
+    LegacyQualityReport,
 )
 
-app = FastAPI(title="Analysis Service", version="1.0.0")
+app = FastAPI(
+    title="AI-Powered Analysis Service",
+    description="A service that analyzes search query value using a hybrid AI and rule-based model.",
+    version="2.0.0",
+)
 
 
-# 🚀 시작 이벤트
 @app.on_event("startup")
 async def startup():
     await connect_to_database()
 
 
-# 🛑 종료 이벤트
 @app.on_event("shutdown")
 async def shutdown():
     await disconnect_from_database()
 
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,231 +46,169 @@ app.add_middleware(
 )
 
 
-# Pydantic 모델
-class QualityReport(BaseModel):
+class EvaluateRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+    user_id: int = Field(..., description="로그인한 사용자의 ID")
+
+
+class ImprovedQuery(BaseModel):
+    """AI가 제안한 개선된 검색어"""
+
+    query: str
+    reason: str
+    score: Optional[int] = None  # 빠른 평가 후 추가
+    commercialValue: Optional[str] = None
+
+
+class FinalQualityReport(BaseModel):
     score: int
     suggestions: List[str]
     keywords: List[str]
     commercialValue: Literal["low", "medium", "high"]
-
-
-class EvaluateRequest(BaseModel):
-    query: str
+    ai_analysis: Optional[AiAnalysisReport] = None
+    needsImprovement: bool = False  # ⭐ 개선 필요 플래그
+    aiSuggestions: Optional[List[ImprovedQuery]] = None  # ⭐ AI 개선 제안
 
 
 class EvaluateResponse(BaseModel):
     success: bool
-    data: QualityReport
+    data: FinalQualityReport
     message: str
 
 
-# 상업적 가치 키워드 가중치
-COMMERCIAL_KEYWORDS = {
-    "구매": 25,
-    "가격": 20,
-    "리뷰": 15,
-    "브랜드": 15,
-    "트렌드": 10,
-    "소셜": 10,
-    "인플루언서": 12,
-    "콘텐츠": 8,
-    "통계": 5,
-    "분석": 5,
-    "리서치": 8,
-    "시장조사": 10,
-    "마케팅": 15,
-    "광고": 12,
-    "판매": 18,
-    "홍보": 10,
-}
+def blend_reports(
+    legacy_report: LegacyQualityReport, ai_report: Optional[AiAnalysisReport]
+) -> FinalQualityReport:
+    if not ai_report:
+        return FinalQualityReport(**legacy_report.dict())
 
-
-def calculate_search_specificity(query: str) -> int:
-    """검색어의 구체성에 따른 포인트 계산 (10-100점)"""
-    # 기본 포인트
-    points = 10
-
-    # 검색어 길이에 따른 포인트 증가
-    if len(query) >= 15:
-        points += 40
-    elif len(query) >= 10:
-        points += 30
-    elif len(query) >= 7:
-        points += 20
-    elif len(query) >= 5:
-        points += 15
-    elif len(query) >= 3:
-        points += 10
-
-    # 숫자가 포함된 경우 (모델명, 연도 등) 포인트 대폭 증가
-    if re.search(r"\d", query):
-        points += 25
-        # 연도가 포함된 경우 추가 포인트
-        if re.search(r"\b(20\d{2}|19\d{2})\b", query):
-            points += 10
-
-    # 브랜드명 + 모델명 조합 (예: 아이폰16, 갤럭시S24)
-    brand_model_patterns = [
-        r"아이폰\s*\d+",
-        r"iphone\s*\d+",
-        r"갤럭시\s*[a-z]?\d+",
-        r"galaxy\s*[a-z]?\d+",
-        r"맥북\s*(프로|에어|미니)?",
-        r"macbook\s*(pro|air|mini)?",
-        r"삼성\s*노트북",
-        r"samsung\s*laptop",
-    ]
-
-    if any(
-        re.search(pattern, query, re.IGNORECASE) for pattern in brand_model_patterns
-    ):
-        points += 30
-
-    # 특정 키워드 조합
-    specific_combinations = [
-        "아이폰16",
-        "iphone16",
-        "갤럭시s24",
-        "galaxys24",
-        "맥북프로",
-        "macbookpro",
-        "삼성노트북",
-        "samsunglaptop",
-        "아이패드",
-        "ipad",
-        "에어팟",
-        "airpods",
-    ]
-
-    if any(combo in query.lower() for combo in specific_combinations):
-        points += 20
-
-    # 최종 포인트 범위 제한 (10-100)
-    return max(10, min(100, points))
-
-
-def get_quality_grade(points: int) -> str:
-    """포인트에 따른 품질 등급 반환"""
-    if points >= 80:
-        return "Excellent"
-    elif points >= 60:
-        return "Very Good"
-    elif points >= 40:
-        return "Good"
-    elif points >= 20:
-        return "Fair"
-    else:
-        return "Poor"
-
-
-def evaluate_data_value(query: str) -> QualityReport:
-    """입력된 검색어를 기반으로 상업적 가치 점수와 품질 개선 제안을 반환"""
-    # 구체성 포인트 계산
-    specificity_points = calculate_search_specificity(query)
-
-    lower_query = query.lower()
-    score = specificity_points
-    matched_keywords = []
-    suggestions = []
-
-    # 기존 키워드 매칭 및 점수 추가
-    for keyword, weight in COMMERCIAL_KEYWORDS.items():
-        if keyword.lower() in lower_query:
-            score += weight * 0.5  # 기존 키워드의 가중치를 절반으로 줄임
-            matched_keywords.append(keyword)
-
-    # 최종 점수 범위 제한 (10-100)
-    score = max(10, min(100, int(score)))
-
-    # 상업적 가치 등급 결정
-    if score >= 70:
+    final_score = int(
+        (
+            ai_report.commercial_intent * 100 * 0.5
+            + ai_report.specificity_level * 100 * 0.3
+        )
+        + (legacy_report.score * 0.2)
+    )
+    final_score = max(10, min(100, final_score))
+    if final_score >= 75:
         commercial_value = "high"
-    elif score >= 40:
+    elif final_score >= 45:
         commercial_value = "medium"
     else:
         commercial_value = "low"
 
-    # 구체성에 따른 품질 개선 제안 생성
-    if score < 30:
-        suggestions.append("Add specific model numbers (e.g., iPhone 16, Galaxy S24)")
-        suggestions.append("Include brand names and product categories")
-    elif score < 60:
-        suggestions.append("Add more specific product details")
-        suggestions.append("Include year or generation information")
+    suggestions = []
+    if ai_report.specificity_level < 0.4:
+        if ai_report.predicted_keywords:
+            suggestions.append(
+                f"'{ai_report.predicted_keywords[0]}'와 같은 구체적인 제품명을 사용해보세요."
+            )
+        else:
+            suggestions.append("구체적인 제품명이나 브랜드를 포함해보세요.")
+    if ai_report.buyer_journey_stage == "Consideration":
+        suggestions.append(
+            "'비교', '리뷰', '추천'과 같은 키워드를 추가하면 더 가치있는 정보를 얻을 수 있습니다."
+        )
     else:
-        suggestions.append(
-            "Excellent specificity! Your search has high commercial value"
-        )
-        suggestions.append(
-            "Consider adding additional specifications for even higher value"
-        )
-
-    # 구체성 수준에 따른 추가 제안
-    if specificity_points < 40:
-        suggestions.append(
-            "More specific searches earn higher points and better rewards"
-        )
-
-    return QualityReport(
-        score=score,
+        suggestions.append("훌륭한 검색어입니다! 잠재적 가치가 높게 평가되었습니다.")
+    return FinalQualityReport(
+        score=final_score,
         suggestions=suggestions,
-        keywords=matched_keywords,
+        keywords=list(set(legacy_report.keywords + ai_report.predicted_keywords)),
         commercialValue=commercial_value,
+        ai_analysis=ai_report,
     )
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate_query(request: EvaluateRequest):
-    """검색어의 데이터 가치를 평가합니다."""
-    try:
-        # 검색어 유효성 검사
-        if not request.query or not request.query.strip():
-            raise HTTPException(status_code=400, detail="검색어를 입력해주세요.")
+    query_text = request.query.strip()
 
-        if len(request.query) > 200:
-            raise HTTPException(
-                status_code=400, detail="검색어는 200자 이내로 입력해주세요."
+    # AI 분석 (느림: ~5초)과 Legacy 분석 (빠름: ~0.1초)을 동시 시작
+    ai_task = asyncio.create_task(analyze_query_with_ai(query_text))
+    legacy_task = asyncio.to_thread(evaluate_data_value_legacy, query_text)
+
+    # Legacy는 반드시 기다림 (매우 빠름)
+    legacy_report = await legacy_task
+
+    # AI는 충분한 시간(10초)을 주고 기다림 (품질 우선, 프론트엔드에서 로딩 표시)
+    try:
+        ai_report = await asyncio.wait_for(ai_task, timeout=10.0)
+        print(f"✓ AI 분석 완료: {query_text[:30]}... (고품질 결과)")
+    except asyncio.TimeoutError:
+        print(f"⚠ AI 타임아웃 (10초 초과): {query_text[:30]}... → Legacy 사용")
+        ai_report = None
+    except Exception as e:
+        print(f"❌ AI 분석 실패: {e} → Legacy 사용")
+        ai_report = None
+
+    final_report = blend_reports(legacy_report, ai_report)
+
+    # ⭐ 30점 미만 또는 low 값이면 AI 개선 제안 생성
+    if final_report.score < 30 or final_report.commercialValue == "low":
+        print(
+            f"🔄 저품질 검색어 감지 ({final_report.score}점) - AI 개선 제안 생성 중..."
+        )
+        try:
+            improved_suggestions = await asyncio.wait_for(
+                generate_improved_queries(query_text), timeout=10.0
             )
 
-        # 데이터 가치 평가
-        quality_report = evaluate_data_value(request.query.strip())
+            if improved_suggestions:
+                # 각 제안 검색어도 빠르게 평가 (Legacy만 사용)
+                evaluated_suggestions = []
+                for sugg in improved_suggestions:
+                    quick_eval = evaluate_data_value_legacy(sugg["query"])
+                    evaluated_suggestions.append(
+                        ImprovedQuery(
+                            query=sugg["query"],
+                            reason=sugg.get("reason", "개선됨"),
+                            score=quick_eval.score,
+                            commercialValue=quick_eval.commercialValue,
+                        )
+                    )
 
-        # 검색어 데이터를 DB에 저장
-        query = """
-            INSERT INTO search_queries (user_id, query_text, quality_score, commercial_value, keywords, suggestions)
-            VALUES (:user_id, :query_text, :quality_score, :commercial_value, :keywords, :suggestions)
-        """
-
-        import json
-
-        await database.execute(
-            query,
-            {
-                "user_id": 1,  # 하드코딩된 user_id
-                "query_text": request.query.strip(),
-                "quality_score": quality_report.score,
-                "commercial_value": quality_report.commercialValue,
-                "keywords": json.dumps(quality_report.keywords),
-                "suggestions": json.dumps(quality_report.suggestions),
-            },
-        )
-
-        return EvaluateResponse(
-            success=True,
-            data=quality_report,
-            message="데이터 가치 평가가 완료되었습니다.",
-        )
-
+                final_report.needsImprovement = True
+                final_report.aiSuggestions = evaluated_suggestions
+                print(f"✨ AI 개선 제안 생성 완료: {len(evaluated_suggestions)}개")
+        except Exception as e:
+            print(f"⚠️ 개선 제안 생성 실패: {e}")
+    db_query = """
+        INSERT INTO search_queries (user_id, query_text, quality_score, commercial_value, keywords, suggestions, ai_analysis_data)
+        VALUES (:user_id, :query_text, :quality_score, :commercial_value, :keywords, :suggestions, :ai_analysis_data)
+    """
+    values = {
+        "user_id": request.user_id,
+        "query_text": query_text,
+        "quality_score": final_report.score,
+        "commercial_value": final_report.commercialValue,
+        "keywords": json.dumps(final_report.keywords),
+        "suggestions": json.dumps(final_report.suggestions),
+        "ai_analysis_data": (
+            final_report.ai_analysis.json() if final_report.ai_analysis else None
+        ),
+    }
+    try:
+        await database.execute(db_query, values)
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"서버 오류가 발생했습니다: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+    return EvaluateResponse(
+        success=True,
+        data=final_report,
+        message="AI 기반 데이터 가치 평가가 완료되었습니다.",
+    )
 
 
 @app.get("/health")
 async def health_check():
-    """서비스 상태 확인"""
-    return {"status": "healthy", "service": "analysis-service", "database": "connected"}
+    db_status = "connected" if database.is_connected else "disconnected"
+    return {
+        "status": "healthy",
+        "service": "Analysis Service v2.0",
+        "database": db_status,
+        "ai_model": "models/gemini-flash-latest",
+    }
 
 
 if __name__ == "__main__":

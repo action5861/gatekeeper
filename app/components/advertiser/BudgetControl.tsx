@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react'
 interface BudgetControlProps {
     dailyBudget: number
     maxBidPerKeyword: number
-    onBudgetChange: (dailyBudget: number, maxBidPerKeyword: number) => void
+    onBudgetChange: (dailyBudget: number, maxBidPerKeyword: number) => Promise<boolean>
     isLoading?: boolean
 }
 
@@ -19,6 +19,8 @@ export default function BudgetControl({
     const [localDailyBudget, setLocalDailyBudget] = useState(dailyBudget)
     const [localMaxBid, setLocalMaxBid] = useState(maxBidPerKeyword)
     const [isSaving, setIsSaving] = useState(false)
+    const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle')
+    const [statusMessage, setStatusMessage] = useState('')
 
     useEffect(() => {
         setLocalDailyBudget(dailyBudget)
@@ -26,9 +28,23 @@ export default function BudgetControl({
     }, [dailyBudget, maxBidPerKeyword])
 
     const handleSave = async () => {
+        if (isSaving) return
         setIsSaving(true)
+        setStatus('idle')
+        setStatusMessage('')
         try {
-            await onBudgetChange(localDailyBudget, localMaxBid)
+            const saved = await onBudgetChange(localDailyBudget, localMaxBid)
+            if (saved) {
+                setStatus('success')
+                setStatusMessage('예산 설정이 안전하게 저장되었습니다.')
+            } else {
+                setStatus('error')
+                setStatusMessage('예산 설정을 저장하지 못했습니다. 다시 시도해주세요.')
+            }
+        } catch (error) {
+            console.error('BudgetControl handleSave error:', error)
+            setStatus('error')
+            setStatusMessage('예산 설정 저장 중 문제가 발생했습니다.')
         } finally {
             setIsSaving(false)
         }
@@ -183,6 +199,18 @@ export default function BudgetControl({
                 >
                     {isSaving ? '저장 중...' : '설정 저장'}
                 </button>
+                {status !== 'idle' && statusMessage && (
+                    <div
+                        role="status"
+                        aria-live="polite"
+                        className={`mt-4 rounded-lg border px-4 py-3 text-sm ${status === 'success'
+                                ? 'border-[#4CAF50] bg-[#4CAF50]/10 text-[#4CAF50]'
+                                : 'border-[#FFD700] bg-[#FFD700]/10 text-[#FFD700]'
+                            }`}
+                    >
+                        {statusMessage}
+                    </div>
+                )}
             </div>
 
             {/* 로딩 상태 */}

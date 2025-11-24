@@ -1,6 +1,9 @@
--- 🗄️ 검색 데이터 거래 플랫폼 DB 스키마
+-- 검색 데이터 거래 플랫폼 DB 스키마
 
--- 👥 사용자 테이블
+-- PostgreSQL 인덱스 최적화: pg_trgm 확장 설치
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- 사용자 테이블
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
@@ -13,7 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     submission_count INTEGER DEFAULT 0
 );
 
--- 🏢 광고주 테이블
+-- 광고주 테이블
 CREATE TABLE IF NOT EXISTS advertisers (
     id SERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
@@ -26,7 +29,7 @@ CREATE TABLE IF NOT EXISTS advertisers (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 🔍 검색 쿼리 테이블
+-- 검색 쿼리 테이블
 CREATE TABLE IF NOT EXISTS search_queries (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -38,7 +41,7 @@ CREATE TABLE IF NOT EXISTS search_queries (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 🏪 경매 테이블
+-- 경매 테이블
 CREATE TABLE IF NOT EXISTS auctions (
     id SERIAL PRIMARY KEY,
     search_id VARCHAR(100) UNIQUE NOT NULL,
@@ -50,7 +53,7 @@ CREATE TABLE IF NOT EXISTS auctions (
     selected_bid_id VARCHAR(100)
 );
 
--- 💰 입찰 테이블
+-- 입찰 테이블
 CREATE TABLE IF NOT EXISTS bids (
     id VARCHAR(100) PRIMARY KEY,
     auction_id INTEGER REFERENCES auctions(id),
@@ -64,7 +67,7 @@ CREATE TABLE IF NOT EXISTS bids (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 💸 거래 내역 테이블
+-- 거래 내역 테이블
 CREATE TABLE IF NOT EXISTS transactions (
     id VARCHAR(100) PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -83,7 +86,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 📄 검증 요청 테이블
+-- 검증 요청 테이블
 CREATE TABLE IF NOT EXISTS verification_requests (
     id SERIAL PRIMARY KEY,
     transaction_id VARCHAR(100) REFERENCES transactions(id),
@@ -94,7 +97,7 @@ CREATE TABLE IF NOT EXISTS verification_requests (
     processed_at TIMESTAMP
 );
 
--- 📊 사용자 품질 이력 테이블 (UNIQUE 제약조건 추가)
+-- 사용자 품질 이력 테이블 (UNIQUE 제약조건 추가)
 CREATE TABLE IF NOT EXISTS user_quality_history (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -104,7 +107,7 @@ CREATE TABLE IF NOT EXISTS user_quality_history (
     UNIQUE(user_id, week_label)
 );
 
--- 📅 일일 제출 현황 테이블
+-- 일일 제출 현황 테이블
 CREATE TABLE IF NOT EXISTS daily_submissions (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
@@ -117,7 +120,7 @@ CREATE TABLE IF NOT EXISTS daily_submissions (
     UNIQUE(user_id, submission_date)
 );
 
--- 🔍 인덱스 생성 (성능 최적화)
+-- 인덱스 생성 (성능 최적화)
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_advertisers_email ON advertisers(email);
 CREATE INDEX IF NOT EXISTS idx_auctions_search_id ON auctions(search_id);
@@ -130,7 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_bids_user ON bids(user_id);
 CREATE INDEX IF NOT EXISTS idx_verification_status ON verification_requests(verification_status);
 CREATE INDEX IF NOT EXISTS idx_daily_submissions_user_date ON daily_submissions(user_id, submission_date);
 
--- 📝 샘플 데이터 삽입
+-- 샘플 데이터 삽입
 INSERT INTO users (username, email, hashed_password, total_earnings, quality_score) VALUES 
 ('testuser', 'test@example.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj0kEa8E0zdy', 1500.00, 75),
 ('sampleuser', 'sample@example.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj0kEa8E0zdy', 850.00, 68)
@@ -192,7 +195,7 @@ INSERT INTO daily_submissions (user_id, submission_date, submission_count, quali
 (2, CURRENT_DATE - INTERVAL '1 day', 7, 65)
 ON CONFLICT (user_id, submission_date) DO NOTHING;
 
--- 🏷️ 광고주 키워드 테이블
+-- 광고주 키워드 테이블
 CREATE TABLE IF NOT EXISTS advertiser_keywords (
     id SERIAL PRIMARY KEY,
     advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
@@ -203,7 +206,7 @@ CREATE TABLE IF NOT EXISTS advertiser_keywords (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 📂 광고주 카테고리 테이블  
+-- 광고주 카테고리 테이블  
 CREATE TABLE IF NOT EXISTS advertiser_categories (
     id SERIAL PRIMARY KEY,
     advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
@@ -213,7 +216,7 @@ CREATE TABLE IF NOT EXISTS advertiser_categories (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 🏢 비즈니스 카테고리 마스터 테이블
+-- 비즈니스 카테고리 마스터 테이블
 CREATE TABLE IF NOT EXISTS business_categories (
     id SERIAL PRIMARY KEY,
     parent_id INTEGER REFERENCES business_categories(id),
@@ -225,7 +228,7 @@ CREATE TABLE IF NOT EXISTS business_categories (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- ✅ 광고주 심사 상태 테이블
+-- 광고주 심사 상태 테이블
 CREATE TABLE IF NOT EXISTS advertiser_reviews (
     id SERIAL PRIMARY KEY,
     advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
@@ -239,10 +242,11 @@ CREATE TABLE IF NOT EXISTS advertiser_reviews (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 🤖 자동 입찰 설정 테이블
+-- 자동 입찰 설정 테이블
 CREATE TABLE IF NOT EXISTS auto_bid_settings (
     id SERIAL PRIMARY KEY,
-    advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
+    advertiser_id INTEGER NOT NULL REFERENCES advertisers(id) ON DELETE CASCADE,
+    CONSTRAINT auto_bid_settings_advertiser_unique UNIQUE (advertiser_id),
     is_enabled BOOLEAN DEFAULT false,
     daily_budget DECIMAL(10,2) DEFAULT 10000.00,
     max_bid_per_keyword INTEGER DEFAULT 3000,
@@ -253,14 +257,48 @@ CREATE TABLE IF NOT EXISTS auto_bid_settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 🔍 추가 인덱스 생성 (성능 최적화)
+-- 추가 인덱스 생성 (성능 최적화)
 CREATE INDEX IF NOT EXISTS idx_advertiser_keywords_keyword ON advertiser_keywords(keyword);
 CREATE INDEX IF NOT EXISTS idx_advertiser_categories_path ON advertiser_categories(category_path);
 CREATE INDEX IF NOT EXISTS idx_business_categories_parent ON business_categories(parent_id);
 CREATE INDEX IF NOT EXISTS idx_advertiser_reviews_status ON advertiser_reviews(review_status);
 CREATE INDEX IF NOT EXISTS idx_auto_bid_settings_enabled ON auto_bid_settings(is_enabled);
 
--- 📊 자동 입찰 로그 테이블 (머신러닝 분석용)
+-- PostgreSQL 인덱스 최적화: pg_trgm 기반 텍스트 검색 인덱스
+-- ⚠️ 중요: 이 인덱스들은 매칭 쿼리 성능을 대폭 향상시킵니다
+-- pg_trgm 확장은 이미 상단(Line 4)에서 설치됨
+
+-- 1. GIN 인덱스 (Trigram 기반 유사도 검색)
+-- LIKE '%keyword%' 패턴 매칭 성능 향상 (10~100배)
+CREATE INDEX IF NOT EXISTS idx_adv_kw_trgm
+ON advertiser_keywords USING gin (lower(keyword) gin_trgm_ops);
+
+-- 2. 표현식 인덱스 (정확 매칭 최적화)
+-- lower(replace(keyword, ' ', '')) 표현식 검색 성능 향상
+CREATE INDEX IF NOT EXISTS idx_adv_kw_exact_expr
+ON advertiser_keywords ((lower(replace(keyword, ' ', ''))));
+
+-- 3. 카테고리 이름 Trigram 인덱스
+-- business_categories의 name 필드 LIKE 검색 성능 향상
+CREATE INDEX IF NOT EXISTS idx_cat_name_trgm
+ON business_categories USING gin (lower(name) gin_trgm_ops);
+
+-- 4. 카테고리 경로 패턴 인덱스
+-- LIKE '경로%' 패턴 매칭 성능 향상 (advertiser_categories)
+CREATE INDEX IF NOT EXISTS idx_adv_cat_path
+ON advertiser_categories (category_path text_pattern_ops);
+
+-- 일일 예산 소비 추적 테이블 (트랜잭션 안정성을 위해)
+CREATE TABLE IF NOT EXISTS advertiser_daily_spend (
+    advertiser_id INT,
+    spend_date DATE,
+    amount BIGINT,
+    PRIMARY KEY(advertiser_id, spend_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_advertiser_daily_spend_date ON advertiser_daily_spend(spend_date);
+
+-- 자동 입찰 로그 테이블 (머신러닝 분석용)
 CREATE TABLE IF NOT EXISTS auto_bid_logs (
     id SERIAL PRIMARY KEY,
     advertiser_id INTEGER REFERENCES advertisers(id) ON DELETE CASCADE,
@@ -274,13 +312,13 @@ CREATE TABLE IF NOT EXISTS auto_bid_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 📈 자동 입찰 로그 인덱스
+-- 자동 입찰 로그 인덱스
 CREATE INDEX IF NOT EXISTS idx_auto_bid_logs_advertiser ON auto_bid_logs(advertiser_id);
 CREATE INDEX IF NOT EXISTS idx_auto_bid_logs_created_at ON auto_bid_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_auto_bid_logs_result ON auto_bid_logs(bid_result);
 CREATE INDEX IF NOT EXISTS idx_auto_bid_logs_match_type ON auto_bid_logs(match_type);
 
--- 📂 비즈니스 카테고리 샘플 데이터
+-- 비즈니스 카테고리 샘플 데이터
 
 -- 대분류 (Level 1)
 INSERT INTO business_categories (name, path, level, sort_order) VALUES

@@ -2,10 +2,10 @@
 
 'use client'
 
-import { BarChart3, Building2, ChevronDown, LogOut, TrendingUp, User } from 'lucide-react'
+import { BarChart3, Building2, ChevronDown, HelpCircle, LogOut, Settings, TrendingUp, User } from 'lucide-react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 export default function Header() {
   const pathname = usePathname()
@@ -13,23 +13,23 @@ export default function Header() {
   const [showDropdown, setShowDropdown] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  const navItems = [
-    {
-      name: 'Exchange',
-      href: '/',
-      icon: TrendingUp
-    },
-    {
-      name: 'Dashboard',
-      href: '/dashboard',
-      icon: BarChart3
-    }
-  ]
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [userType, setUserType] = useState<'user' | 'advertiser' | null>(null)
+
+  const syncAuthState = () => {
+    if (typeof window === 'undefined') return
+    const token = localStorage.getItem('token')
+    const storedUserType = localStorage.getItem('userType') as 'user' | 'advertiser' | null
+    setIsAuthenticated(!!token)
+    setUserType(storedUserType)
+  }
 
   const handleLogout = () => {
     if (typeof window === 'undefined') return
     localStorage.removeItem('token')
     localStorage.removeItem('userType')
+    setIsAuthenticated(false)
+    setUserType(null)
     router.push('/login')
   }
 
@@ -41,13 +41,64 @@ export default function Header() {
     router.push('/login')
   }
 
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      setIsAuthenticated(!!localStorage.getItem('token'))
+    syncAuthState()
+    if (typeof window === 'undefined') return
+    const handleStorage = () => syncAuthState()
+    window.addEventListener('storage', handleStorage)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
     }
   }, [])
+
+  useEffect(() => {
+    syncAuthState()
+  }, [pathname])
+
+  const navItems = useMemo(() => {
+    if (userType === 'advertiser') {
+      return [
+        {
+          name: 'Exchange',
+          href: '/',
+          icon: TrendingUp
+        },
+        {
+          name: 'Advertiser Dashboard',
+          href: '/advertiser/dashboard',
+          icon: BarChart3
+        },
+        {
+          name: 'Auto Bidding',
+          href: '/advertiser/auto-bidding',
+          icon: Settings
+        },
+        {
+          name: 'Review Suggestions',
+          href: '/advertiser/review-suggestions',
+          icon: HelpCircle
+        }
+      ]
+    }
+
+    return [
+      {
+        name: 'Exchange',
+        href: '/',
+        icon: TrendingUp
+      },
+      {
+        name: 'Dashboard',
+        href: '/dashboard',
+        icon: BarChart3
+      },
+      {
+        name: 'How It Works',
+        href: '/how-it-works',
+        icon: HelpCircle
+      }
+    ]
+  }, [userType])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -73,7 +124,7 @@ export default function Header() {
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">
-              Real-time Search Data Exchange
+              Intendex
             </h1>
           </div>
 

@@ -1,0 +1,26 @@
+{
+    "include": [
+        "."
+    ],
+    "exclude": [
+        "venv",
+        "**/venv",
+        "**/__pycache__",
+        "**/*.pyc",
+        "tests"
+    ],
+    "venvPath": ".",
+    "venv": "venv",
+    "pythonVersion": "3.10",
+    "pythonPlatform": "Windows",
+    "typeCheckingMode": "basic",
+    "useLibraryCodeForTypes": true,
+    "autoImportCompletions": true,
+    "autoSearchPaths": true,
+    "extraPaths": [
+        ".",
+        "utils"
+    ],
+    "reportMissingImports": false,
+    "reportMissingTypeStubs": false
+}

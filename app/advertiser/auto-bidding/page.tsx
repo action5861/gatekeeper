@@ -160,10 +160,10 @@ export default function AutoBiddingPage() {
         }
     }
 
-    const handleBudgetChange = async (dailyBudget: number, maxBidPerKeyword: number) => {
+    const handleBudgetChange = async (dailyBudget: number, maxBidPerKeyword: number): Promise<boolean> => {
         try {
             const token = localStorage.getItem('token')
-            if (!token) return
+            if (!token) return false
 
             const response = await fetch('/api/advertiser/auto-bidding', {
                 method: 'PUT',
@@ -187,12 +187,15 @@ export default function AutoBiddingPage() {
                     dailyBudget,
                     maxBidPerKeyword
                 }))
+                return true
             } else {
-                throw new Error('Failed to update budget settings')
+                const errorPayload = await response.text()
+                console.error('Failed to update budget settings:', errorPayload)
+                return false
             }
         } catch (error) {
             console.error('Error updating budget settings:', error)
-            alert('예산 설정 업데이트에 실패했습니다.')
+            return false
         }
     }
 

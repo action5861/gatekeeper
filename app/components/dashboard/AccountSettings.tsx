@@ -1,6 +1,7 @@
 'use client'
 
-import { DollarSign, Globe, Save, Settings } from 'lucide-react'
+import Link from 'next/link'
+import { ArrowRight, DollarSign, Globe, Save, Settings } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 interface AccountSettingsProps {
@@ -150,7 +151,7 @@ export default function AccountSettings({ initialSettings }: AccountSettingsProp
                 <div>
                     <label className="block text-sm font-medium text-slate-300 mb-2">
                         <DollarSign className="w-4 h-4 inline mr-2" />
-                        Daily Budget (₩)
+                        Daily Budget (P)
                     </label>
                     {isEditing ? (
                         <input
@@ -163,13 +164,13 @@ export default function AccountSettings({ initialSettings }: AccountSettingsProp
                         />
                     ) : (
                         <div className="px-4 py-3 bg-slate-700/30 rounded-lg border border-slate-600">
-                            <p className="text-slate-100">₩{settings.dailyBudget.toLocaleString()}</p>
+                            <p className="text-slate-100">{settings.dailyBudget.toLocaleString()}P</p>
                         </div>
                     )}
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex space-x-3 pt-4">
+                <div className="flex flex-col space-y-3 pt-4 sm:flex-row sm:space-y-0 sm:space-x-3">
                     {isEditing ? (
                         <>
                             <button
@@ -208,6 +209,16 @@ export default function AccountSettings({ initialSettings }: AccountSettingsProp
                         </button>
                     )}
                 </div>
+
+                {!isEditing && (
+                    <Link
+                        href="/advertiser/auto-bidding"
+                        className="group inline-flex items-center justify-center rounded-lg bg-blue-600/90 px-4 py-3 text-sm font-semibold text-white transition-all duration-200 hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-300"
+                    >
+                        <span>자동 입찰 설정 페이지로 이동</span>
+                        <ArrowRight className="ml-2 h-4 w-4 transition-transform duration-200 group-hover:translate-x-1" />
+                    </Link>
+                )}
             </div>
         </div>
     )

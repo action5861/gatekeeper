@@ -1,12 +1,14 @@
 'use client'
 
-import Header from '@/components/Header'
+import { AnalysisStatusBanner } from '@/components/advertiser/AnalysisStatusBanner'
+import KeywordsCategoriesManager from '@/components/advertiser/KeywordsCategoriesManager'
 import ReviewStatus from '@/components/advertiser/ReviewStatus'
 import AccountSettings from '@/components/dashboard/AccountSettings'
 import BiddingSummary from '@/components/dashboard/BiddingSummary'
 import BudgetStatus from '@/components/dashboard/BudgetStatus'
 import MyBids from '@/components/dashboard/MyBids'
 import PerformanceHistory from '@/components/dashboard/PerformanceHistory'
+import Header from '@/components/Header'
 import { Clock } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
@@ -24,12 +26,22 @@ interface DashboardData {
     }>
     recentBids: Array<{
         id: string
+        bidId?: string
         auctionId: string
         amount: number
         timestamp: string
         status: 'active' | 'won' | 'lost' | 'pending'
         highestBid?: number
         myBid: number
+        settlement?: {
+            decision: string
+            settled_amount: number
+            v_atf: number
+            clicked: boolean
+            t_dwell_on_ad_site: number
+            trade_id?: string
+            transaction_id?: string
+        } | null
     }>
     additionalStats?: {
         autoBidEnabled: boolean
@@ -179,6 +191,9 @@ export default function AdvertiserDashboard() {
                     <p className="text-slate-400">Manage your bidding campaigns and track performance</p>
                 </div>
 
+                {/* AI Analysis Status Banner */}
+                <AnalysisStatusBanner />
+
                 {/* Review Status - Always show first */}
                 <div className="mb-8 animate-fadeInUp">
                     <ReviewStatus onStatusChange={handleReviewStatusChange} />
@@ -240,6 +255,11 @@ export default function AdvertiserDashboard() {
                         {/* My Bids */}
                         <div className="mt-8 animate-fadeInUp animation-delay-900">
                             <MyBids recentBids={dashboardData?.recentBids} />
+                        </div>
+
+                        {/* Keywords & Categories */}
+                        <div className="mt-8 animate-fadeInUp animation-delay-1000">
+                            <KeywordsCategoriesManager />
                         </div>
                     </>
                 ) : (
