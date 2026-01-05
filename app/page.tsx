@@ -4,6 +4,7 @@
 
 import Header from '@/components/Header'
 import AuctionStatus from '@/components/main/AuctionStatus'
+import HeroSection from '@/components/main/HeroSection'
 import QualityAdvisor from '@/components/main/QualityAdvisor'
 import SearchInput from '@/components/main/SearchInput'
 import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth'
@@ -26,6 +27,9 @@ export default function Home() {
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
+  // ⭐ 점진적 평가를 위한 새로운 상태
+  const [evaluationStage, setEvaluationStage] = useState<'idle' | 'quick' | 'ai'>('idle')
+
   // SLA 추적용 ref (광고 영역을 참조)
   const auctionRef = useRef<HTMLDivElement>(null)
 
@@ -38,11 +42,12 @@ export default function Home() {
     setTimeout(() => setNotification(null), 5000) // 5초 후 자동 제거
   }
 
-  // Step 1: 디바운싱된 검색어가 바뀔 때만 품질 평가 API를 호출 (일일 제출 한도 적용 없음)
+  // Step 1: 디바운싱된 검색어가 바뀔 때만 품질 평가 API를 호출 (점진적 평가)
   useEffect(() => {
     if (!debouncedQuery.trim() || debouncedQuery.trim().length < 2) {
       setQualityReport(null)
       setIsEvaluating(false)
+      setEvaluationStage('idle')
       return
     }
 
@@ -50,41 +55,66 @@ export default function Home() {
     if (didRunRef.current) return;
     didRunRef.current = true;
 
-    console.log(`🔍 [STEP 1] 디바운싱된 검색어 '${debouncedQuery}'로 품질 평가 API를 호출합니다.`)
+    console.log(`🔍 [STEP 1] 디바운싱된 검색어 '${debouncedQuery}'로 점진적 품질 평가를 시작합니다.`)
     setIsEvaluating(true)
+    setEvaluationStage('quick')
 
-    const evaluateQuality = async () => {
+    const evaluateQualityProgressive = async () => {
+      const token = localStorage.getItem('token')
+      const trimmedQuery = debouncedQuery.trim()
+
+      // ⚡ 1단계: 빠른 평가 (Legacy만, ~0.1초)
       try {
-        const token = localStorage.getItem('token')
-        console.log(`🔍 [STEP 1] Calling /api/evaluate-quality for query: "${debouncedQuery.trim()}"`)
-        const response = await fetch('/api/evaluate-quality', {
+        console.log(`⚡ [STEP 1-1] 빠른 평가 시작: "${trimmedQuery}"`)
+        const quickResponse = await fetch('/api/evaluate-quality-quick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: trimmedQuery }),
+        })
+
+        const quickData = await quickResponse.json()
+
+        if (quickData.success) {
+          // 빠른 결과 즉시 표시
+          setQualityReport(quickData.data.qualityReport)
+          setEvaluationStage('ai')
+          console.log(`⚡ [STEP 1-1] 빠른 평가 완료: ${quickData.data.qualityReport.score}점`)
+        }
+      } catch (error) {
+        console.error('Quick evaluation error:', error)
+      }
+
+      // 🤖 2단계: AI 정밀 분석 (~5초)
+      try {
+        console.log(`🤖 [STEP 1-2] AI 정밀 분석 시작: "${trimmedQuery}"`)
+        const aiResponse = await fetch('/api/evaluate-quality', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token && { 'Authorization': `Bearer ${token}` }),
           },
-          body: JSON.stringify({
-            query: debouncedQuery.trim()
-          }),
+          body: JSON.stringify({ query: trimmedQuery }),
         })
 
-        const data = await response.json()
+        const aiData = await aiResponse.json()
 
-        if (data.success) {
-          setQualityReport(data.data.qualityReport)
+        if (aiData.success) {
+          // AI 결과로 업데이트 (점수가 변경되면 애니메이션 효과)
+          setQualityReport(aiData.data.qualityReport)
+          console.log(`🤖 [STEP 1-2] AI 분석 완료: ${aiData.data.qualityReport.score}점`)
         } else {
-          console.error('Quality evaluation failed:', data.error)
-          setQualityReport(null)
+          console.error('AI evaluation failed:', aiData.error)
         }
       } catch (error) {
-        console.error('Quality evaluation error:', error)
-        setQualityReport(null)
+        console.error('AI evaluation error:', error)
+        // AI 실패 시 빠른 평가 결과 유지
       } finally {
         setIsEvaluating(false)
+        setEvaluationStage('idle')
       }
     }
 
-    evaluateQuality()
+    evaluateQualityProgressive()
 
     // cleanup 함수에서 ref 리셋
     return () => {
@@ -298,25 +328,16 @@ export default function Home() {
         </div>
       )}
 
+      {/* Hero Section - Full Width */}
+      <HeroSection />
+
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Hero Section */}
-        <section className="text-center mb-12 animate-fadeInUp">
-          <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-blue-400 via-green-400 to-purple-400 bg-clip-text text-transparent">
-            The World&apos;s First Intent Exchange
-          </h2>
-          <p className="text-xl text-slate-300 max-w-3xl mx-auto leading-relaxed">
-            List what you&apos;re searching for. Advertisers bid in real-time. Get settled when SLA is verified—or they get refunded.
-          </p>
-        </section>
 
         {/* Main Components Area */}
-        <div className="space-y-8 animate-fadeInUp animation-delay-200">
-          {/* Search Input Component - 항상 표시 */}
-          <section className="bg-slate-800/50 rounded-xl p-8 md:p-12 border border-slate-700">
-            <h3 className="text-3xl md:text-4xl font-bold mb-8 text-slate-100 text-center">
-              List Your Intent
-            </h3>
+        <div className="space-y-6 animate-fadeInUp animation-delay-200">
+          {/* Search Input Component - Premium Glassmorphism */}
+          <section className="mt-4 sm:mt-6">
             <SearchInput
               onQueryChange={handleQueryChange}
               onSearchSubmit={handleSearchSubmit}
@@ -324,22 +345,40 @@ export default function Home() {
             />
           </section>
 
-          {/* Quality Advisor Component - 검색어 입력 시 표시 */}
+          {/* Quality Advisor Component - 검색어 입력 시 표시 (점진적 평가) */}
           {(query.trim() || qualityReport) && (
             <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
-              <QualityAdvisor
-                qualityReport={isEvaluating ? null : qualityReport}
-                onQueryReplace={handleQueryReplace}
-              />
-              {isEvaluating && (
+              {/* 빠른 평가 결과가 있으면 즉시 표시 */}
+              {qualityReport && (
+                <QualityAdvisor
+                  qualityReport={qualityReport}
+                  onQueryReplace={handleQueryReplace}
+                />
+              )}
+
+              {/* 평가 단계별 상태 표시 */}
+              {evaluationStage === 'quick' && !qualityReport && (
                 <div className="text-center py-8">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-4 border-t-4 border-blue-500 mx-auto mb-4"></div>
-                  <p className="text-lg font-semibold text-blue-400 mb-2">🤖 AI가 검색어 가치를 분석하고 있습니다...</p>
-                  <p className="text-sm text-slate-400">상업적 의도, 구체성, 구매 단계를 평가 중입니다 (약 5~10초 소요)</p>
-                  <div className="mt-4 flex items-center justify-center space-x-2">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-yellow-500 mx-auto mb-3"></div>
+                  <p className="text-lg font-semibold text-yellow-400 mb-1">⚡ 빠른 분석 중...</p>
+                  <p className="text-sm text-slate-400">잠시만 기다려주세요</p>
+                </div>
+              )}
+
+              {evaluationStage === 'ai' && (
+                <div className="mt-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
+                  <div className="flex items-center space-x-3">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-t-2 border-blue-500"></div>
+                    <div>
+                      <p className="text-sm font-medium text-blue-400">🤖 AI 정밀 분석 진행 중...</p>
+                      <p className="text-xs text-slate-400">상업적 의도, 구체성, 구매 단계를 평가합니다</p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center space-x-2">
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
                     <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse animation-delay-200"></div>
                     <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse animation-delay-400"></div>
+                    <span className="text-xs text-slate-500 ml-2">점수가 변경될 수 있습니다</span>
                   </div>
                 </div>
               )}
@@ -363,10 +402,10 @@ export default function Home() {
             <section className="bg-green-800/20 rounded-xl p-6 border border-green-600/30 animate-fadeInUp">
               <div className="text-center">
                 <h3 className="text-xl font-semibold text-green-400 mb-2">
-                  🎉 Bid Selected Successfully!
+                  🎉 입찰이 성공적으로 선택되었습니다!
                 </h3>
                 <p className="text-slate-300">
-                  Your search data has been sold. Check your dashboard for earnings details.
+                  검색 데이터가 판매되었습니다. 대시보드에서 수익 내역을 확인하세요.
                 </p>
               </div>
             </section>
@@ -379,7 +418,7 @@ export default function Home() {
             © 2025 Intendex. All rights reserved.
           </p>
           <p className="text-xs text-slate-500 font-semibold">
-            Intent as Access. Settlement by Proof.
+            의도가 곧 접근권. 증명으로 정산.
           </p>
         </footer>
       </main>

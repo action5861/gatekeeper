@@ -4,9 +4,10 @@ export type Summary = {
     avgQualityScore: number
     successRate: number
     today: { bids: number; bidValue: number; rewards: number }
+    hasSignupBonusToday?: boolean  // 오늘 가입축하 보너스를 받았는지 여부
 }
 export type TransactionItem = {
-    id: string; query: string; buyerName: string; primaryReward: number; secondaryReward?: number; status: string; timestamp?: string
+    id: string; query: string; buyerName: string; primaryReward: number; secondaryReward?: number; status: string; settlementDecision?: string; timestamp?: string
 }
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000'
 

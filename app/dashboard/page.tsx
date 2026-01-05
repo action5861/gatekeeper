@@ -7,8 +7,10 @@ import RealtimeStats from '@/components/dashboard/RealtimeStats'
 import SubmissionLimitCard from '@/components/dashboard/SubmissionLimitCard'
 import { TransactionHistory } from '@/components/dashboard/TransactionHistory'
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary'
+import SignupBonusModal from '@/components/ui/SignupBonusModal'
 import { DashboardSkeleton } from '@/components/ui/Skeleton'
 import { useDashboardData } from '@/lib/hooks/useDashboardData'
+import { Transaction } from '@/lib/types'
 import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 
@@ -16,6 +18,7 @@ export default function Dashboard() {
   const { transactions, isLoading, error, summary, qualitySeries, realtime, refetch } = useDashboardData()
   const router = useRouter()
   const [shouldRedirect, setShouldRedirect] = useState(false)
+  const [showSignupBonusModal, setShowSignupBonusModal] = useState(false)
 
   useEffect(() => {
     const token = localStorage.getItem('token')
@@ -36,6 +39,20 @@ export default function Dashboard() {
       router.replace('/advertiser/dashboard')
     }
   }, [error, router])
+
+  // 가입축하 보너스 팝업 표시 (오늘 받았고, 아직 팝업을 보지 않은 경우)
+  useEffect(() => {
+    if (summary?.hasSignupBonusToday) {
+      // localStorage에 오늘 팝업을 봤는지 확인
+      const today = new Date().toDateString()
+      const lastShownDate = localStorage.getItem('signupBonusModalShown')
+
+      if (lastShownDate !== today) {
+        setShowSignupBonusModal(true)
+        localStorage.setItem('signupBonusModalShown', today)
+      }
+    }
+  }, [summary?.hasSignupBonusToday])
 
   if (shouldRedirect || error?.message === 'advertiser_redirect') {
     return <DashboardSkeleton />
@@ -59,13 +76,19 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-slate-900">
       <Header />
+      {/* 가입축하 보너스 팝업 */}
+      <SignupBonusModal
+        isOpen={showSignupBonusModal}
+        onClose={() => setShowSignupBonusModal(false)}
+        amount={5000}
+      />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mb-8 flex justify-between items-center">
           <div>
             <h1 className="text-3xl font-bold text-slate-100 mb-2">Dashboard</h1>
             <p className="text-slate-400">Track your earnings and quality performance</p>
           </div>
-          <button 
+          <button
             onClick={refetch}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
           >
@@ -110,7 +133,11 @@ export default function Dashboard() {
 
         <div className="mt-8 animate-fadeInUp animation-delay-900">
           <ErrorBoundary>
-            {transactions && <TransactionHistory initialTransactions={transactions} />}
+            {transactions && <TransactionHistory initialTransactions={transactions.map(t => ({
+              ...t,
+              status: t.status as Transaction['status'],
+              timestamp: t.timestamp || new Date().toISOString()
+            }))} />}
           </ErrorBoundary>
         </div>
       </main>

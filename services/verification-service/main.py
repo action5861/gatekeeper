@@ -361,18 +361,18 @@ async def verify_delivery_and_trigger_settlement(payload: DeliveryMetricsPayload
             print(
                 f"   광고 클릭 + 광고주 사이트 20초 이상 체류 ({payload.t_dwell_on_ad_site:.2f}s)"
             )
-        elif payload.t_dwell_on_ad_site > 3.0:
+        elif payload.t_dwell_on_ad_site > 10.0:
             decision = "PARTIAL"
             print(f"⚠️ SLA PARTIAL for trade_id: {payload.trade_id}")
             print(
-                f"   광고 클릭 + 광고주 사이트 3초 초과 체류 ({payload.t_dwell_on_ad_site:.2f}s, 3s < dwell < 20s)"
+                f"   광고 클릭 + 광고주 사이트 10초 초과 체류 ({payload.t_dwell_on_ad_site:.2f}s, 10s < dwell < 20s)"
             )
         else:
-            # 클릭했지만 광고주 사이트 체류 시간이 3초 이하 = FAILED
+            # 클릭했지만 광고주 사이트 체류 시간이 10초 이하 = FAILED
             decision = "FAILED"
             print(f"❌ SLA FAILED for trade_id: {payload.trade_id}")
             print(
-                f"   광고 클릭 O, 하지만 체류 시간 부족 ({payload.t_dwell_on_ad_site:.2f}s <= 3s)"
+                f"   광고 클릭 O, 하지만 체류 시간 부족 ({payload.t_dwell_on_ad_site:.2f}s <= 10s)"
             )
 
         # 3. Settlement Service에 판정 결과 전달
@@ -473,21 +473,21 @@ async def verify_return(request: dict):
             values={"trade_id": trade_id, "dwell_time": dwell_time},
         )
 
-        # SLA 기준에 따라 판정 (선형 보상 시스템)
+        # SLA 기준에 따라 판정 (선형 보상 시스템) - 10초 이상부터 보상 시작
         decision = "FAILED"
 
         if dwell_time >= 20.0:
             decision = "PASSED"
             print(f"✅ [2nd Evaluation] PASSED - Dwell time >= 20s")
-        elif dwell_time > 3.0:
+        elif dwell_time > 10.0:
             decision = "PARTIAL"
             print(
-                f"⚠️ [2nd Evaluation] PARTIAL - Dwell time: {dwell_time:.2f}s (3s < dwell < 20s)"
+                f"⚠️ [2nd Evaluation] PARTIAL - Dwell time: {dwell_time:.2f}s (10s < dwell < 20s)"
             )
         else:
-            decision = "FAILED"  # 3초 이하는 보상 없음
+            decision = "FAILED"  # 10초 이하는 보상 없음
             print(
-                f"❌ [2nd Evaluation] FAILED - Dwell time too short: {dwell_time:.2f}s (<= 3s)"
+                f"❌ [2nd Evaluation] FAILED - Dwell time too short: {dwell_time:.2f}s (<= 10s)"
             )
 
         # transactions 테이블 상태 업데이트

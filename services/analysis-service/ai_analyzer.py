@@ -66,23 +66,141 @@ def _get_model() -> Any:
     return _model
 
 
-# --- 마스터 프롬프트 ---
+# --- 마스터 프롬프트 (v2.0 - 상세 가이드라인 포함) ---
 MASTER_PROMPT_TEMPLATE = """
-You are a world-class market analyst and data scientist. Your task is to analyze the commercial value of a user's search query.
-Analyze the following query based on multiple dimensions and respond ONLY with a valid JSON object that conforms to the provided schema.
+You are a world-class market analyst and data scientist working for an intent exchange
+that rewards users based on the QUALITY of their search queries.
+
+Your objective:
+- Evaluate how commercially valuable and specific a user's search query is.
+- Produce stable, consistent scoring based on clearly defined criteria.
+- Ensure advertisers can safely bid, and users with high-quality queries can receive higher rewards.
+
+Analyze the following search query and respond ONLY with a valid JSON object.
 
 Search Query: "{query}"
 
-JSON Schema to follow:
+------------------------------------------------------------
+### 1) commercial_intent (0.0 ~ 1.0) — PURCHASE INTENT SCALE
+------------------------------------------------------------
+
+0.0 ~ 0.2 : SPAM / INVALID / NO VALUE
+- Gibberish, random characters, single letters, keyboard mashing.
+- Profanity, adult content, illegal queries.
+- Bot-like patterns, repeated characters.
+Examples: "ㅁㄴㅇㄹ", "asdf", "ㅋㅋㅋㅋ", "테스트", "1234"
+
+0.2 ~ 0.4 : Very low commercial intent.
+- General curiosity, news, weather, time.
+- No commercial outcome possible.
+Examples: "날씨", "뉴스", "시간", "hello", "오늘 몇일"
+
+0.4 ~ 0.6 : Moderate commercial or research intent.
+- User is researching but not yet ready to buy.
+- Broad category, early-stage interest.
+Examples: "아이폰 16 출시일", "쏘렌토 연비", "제주도 여행 코스"
+
+0.6 ~ 0.8 : Strong commercial intent.
+- Clear interest in products/services with comparison mindset.
+- User is actively considering purchase.
+Examples: "아이폰 16 프로 후기", "강남 눈성형 추천", "전기차 보조금"
+
+0.8 ~ 1.0 : Very strong purchase or transaction intent.
+- Clear willingness to buy, compare prices, request quotes.
+- User is ready to take action NOW.
+Examples: "아이폰 16 프로 자급제 최저가", "강남 눈성형 가격 비교",
+          "자동차 보험 견적", "삼성화재 다이렉트 가입", "오늘 배송 가능"
+
+------------------------------------------------------------
+### 2) specificity_level (0.0 ~ 1.0) — QUERY PRECISION SCALE
+------------------------------------------------------------
+
+0.0 ~ 0.2 : Single word / extremely vague.
+Examples: "보험", "여행", "신발", "폰"
+
+0.2 ~ 0.4 : Broad category, no specifics.
+Examples: "남자 신발", "해외여행", "스마트폰 추천"
+
+0.4 ~ 0.6 : Somewhat specific — category + brand OR location.
+Examples: "하와이 패키지", "나이키 러닝화", "강남 피부과"
+
+0.6 ~ 0.8 : Specific — brand + model OR location + service.
+Examples: "나이키 베이퍼플라이 3", "제주도 롯데호텔", "강남 눈성형 비용"
+
+0.8 ~ 1.0 : Highly specific — brand + model + condition/action/size.
+Examples: "나이키 베이퍼플라이 3 사이즈 270 최저가",
+          "제주도 롯데호텔 조식 포함 12월 예약"
+
+------------------------------------------------------------
+### 3) value_category (ENUM SELECTION RULES)
+------------------------------------------------------------
+Choose the SINGLE best category that represents the main commercial domain:
+- Shopping: 쇼핑/제품 구매 관련
+- Travel: 여행/숙박/항공
+- Finance: 보험/대출/투자/은행
+- Information: 정보 탐색 중심 (상업적 가치 낮음)
+- Local: 지역 기반 서비스 (예: 강남 피부과, 홍대 맛집)
+- Entertainment: 공연/영화/취미/게임
+- Health: 병원/시술/운동/의료/건강식품
+- Other: 위에 포함되지 않는 경우
+
+------------------------------------------------------------
+### 4) buyer_journey_stage (ENUM SELECTION RULES)
+------------------------------------------------------------
+Classify based on user's intent depth:
+
+- Awareness: 개념 탐색, 정보만 찾는 단계 (예: "전기차란")
+- Consideration: 특정 브랜드/카테고리 후보 비교 단계 (예: "테슬라 vs 현대")
+- Decision: 가격 비교, 견적 요청, 구매 직전 단계 (예: "테슬라 모델3 최저가")
+- Retention: 기존 고객의 재구매/추가 구매 의도 (예: "테슬라 충전카드 재발급")
+
+------------------------------------------------------------
+### 5) primary_emotion (ENUM SELECTION RULES)
+------------------------------------------------------------
+Choose the emotion that best represents the user's motivation:
+
+- Curiosity: 단순 호기심, 정보 탐색
+- Urgency: 긴급한 필요 (예: 오늘 배송, 보험 당일 가입, 급처)
+- Doubt: 비교/검토/리스크 고려 느낌 (예: 후기, 장단점, 부작용)
+- Excitement: 새 제품/여행/구매 기대감 (예: 신상, 출시, 예약)
+- Neutral: 감정적 신호 없음
+
+------------------------------------------------------------
+### 6) predicted_keywords (CRITICAL RULE)
+------------------------------------------------------------
+Return 3–5 keywords that would help advertisers match the query.
+- MUST be written in Korean if the user's query is Korean.
+- Should reflect commercial intent (brand, model, price, compare, buy, quote).
+- Avoid generic terms like "정보", "검색", "추천".
+- Include the main subject + action/attribute keywords.
+
+Good examples:
+["아이폰16", "자급제", "최저가", "가격비교"]
+["강남", "눈성형", "후기", "비용"]
+["제주도", "호텔", "조식포함", "예약"]
+
+Bad examples:
+["정보", "검색", "추천", "좋은"]
+
+------------------------------------------------------------
+### Language & output format
+------------------------------------------------------------
+- Return JSON only. No markdown, no code fences, no commentary.
+- Enum values MUST remain in English.
+- All free-text values (predicted_keywords) MUST follow the language of the original query.
+- Korean query → Korean keywords.
+
+------------------------------------------------------------
+### JSON Schema to follow EXACTLY
+------------------------------------------------------------
 {{
-"commercial_intent": "float (0.0 to 1.0)",
-"specificity_level": "float (0.0 to 1.0)",
-"value_category": "string (Choose one from: 'Shopping', 'Travel', 'Finance', 'Information', 'Local', 'Entertainment', 'Health', 'Other')",
-"buyer_journey_stage": "string (Choose one from: 'Awareness', 'Consideration', 'Decision', 'Retention')",
-"primary_emotion": "string (Choose one from: 'Curiosity', 'Urgency', 'Doubt', 'Excitement', 'Neutral')",
-"predicted_keywords": "array of strings (Predict 3-5 core keywords)"
+  "commercial_intent": float,
+  "specificity_level": float,
+  "value_category": "Shopping | Travel | Finance | Information | Local | Entertainment | Health | Other",
+  "buyer_journey_stage": "Awareness | Consideration | Decision | Retention",
+  "primary_emotion": "Curiosity | Urgency | Doubt | Excitement | Neutral",
+  "predicted_keywords": ["string", "string", "string"]
 }}
-Return JSON only, without any extra commentary or code fences.
 """
 
 

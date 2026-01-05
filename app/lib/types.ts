@@ -67,7 +67,7 @@ export interface ApiResponse<T> {
 }
 
 // 거래 내역 상태 타입
-export type TransactionStatus = '1차 완료' | '검증 대기중' | '2차 완료' | '검증 실패';
+export type TransactionStatus = '1차 완료' | '검증 대기중' | '2차 완료' | '검증 실패' | 'SETTLED' | 'PENDING_VERIFICATION' | 'FAILED' | 'PARTIAL_SETTLED' | 'FULL_SETTLED';
 
 // 거래 내역 타입
 export interface Transaction {
@@ -77,5 +77,6 @@ export interface Transaction {
   primaryReward: number;
   secondaryReward?: number;
   status: TransactionStatus;
+  settlementDecision?: string;  // 'PASSED', 'PARTIAL', 'FAILED'
   timestamp: string;
 } 

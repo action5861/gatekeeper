@@ -24,25 +24,27 @@ interface KeywordsCategoriesManagerProps {
     advertiserId?: number
 }
 
-export default function KeywordsCategoriesManager({ advertiserId }: KeywordsCategoriesManagerProps) {
+export default function KeywordsCategoriesManager({ advertiserId: propAdvertiserId }: KeywordsCategoriesManagerProps) {
     const [keywords, setKeywords] = useState<Keyword[]>([])
     const [categories, setCategories] = useState<Category[]>([])
     const [isLoading, setIsLoading] = useState(true)
     const [newKeyword, setNewKeyword] = useState('')
     const [isSaving, setIsSaving] = useState(false)
+    const [currentAdvertiserId, setCurrentAdvertiserId] = useState<number | null>(propAdvertiserId || null)
 
     useEffect(() => {
         fetchData()
-    }, [advertiserId])
+    }, [propAdvertiserId])
 
     const fetchData = async () => {
-        if (!advertiserId) {
+        if (!propAdvertiserId) {
             // advertiserId가 없으면 /me에서 가져오기
             try {
                 const meResponse = await authenticatedFetch('/api/advertiser/me')
                 if (meResponse.ok) {
                     const meData = await meResponse.json()
                     if (meData.id) {
+                        setCurrentAdvertiserId(meData.id)
                         await fetchKeywordsAndCategories(meData.id)
                     }
                 }
@@ -53,7 +55,8 @@ export default function KeywordsCategoriesManager({ advertiserId }: KeywordsCate
             return
         }
 
-        await fetchKeywordsAndCategories(advertiserId)
+        setCurrentAdvertiserId(propAdvertiserId)
+        await fetchKeywordsAndCategories(propAdvertiserId)
         setIsLoading(false)
     }
 
@@ -104,11 +107,14 @@ export default function KeywordsCategoriesManager({ advertiserId }: KeywordsCate
     }
 
     const handleSave = async () => {
-        if (!advertiserId) return
+        if (!currentAdvertiserId) {
+            alert('광고주 정보를 불러오는 중입니다. 잠시 후 다시 시도해주세요.')
+            return
+        }
 
         setIsSaving(true)
         try {
-            const response = await authenticatedFetch(`/api/advertiser/keywords/${advertiserId}`, {
+            const response = await authenticatedFetch(`/api/advertiser/keywords/${currentAdvertiserId}`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
@@ -118,7 +124,7 @@ export default function KeywordsCategoriesManager({ advertiserId }: KeywordsCate
 
             if (response.ok) {
                 alert('키워드가 저장되었습니다')
-                await fetchKeywordsAndCategories(advertiserId)
+                await fetchKeywordsAndCategories(currentAdvertiserId)
             } else {
                 alert('저장에 실패했습니다')
             }
@@ -219,11 +225,10 @@ export default function KeywordsCategoriesManager({ advertiserId }: KeywordsCate
                         {categories.map((cat) => (
                             <div
                                 key={cat.id}
-                                className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${
-                                    cat.is_primary
+                                className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${cat.is_primary
                                         ? 'border-purple-500 bg-purple-500/10'
                                         : 'border-slate-600 bg-slate-700/30'
-                                }`}
+                                    }`}
                             >
                                 <span className="text-slate-100">{cat.category_path}</span>
                                 {cat.is_primary && (

@@ -3,7 +3,8 @@
 import AdvertiserReviewCard from '@/components/admin/AdvertiserReviewCard'
 import ApprovedAdvertiserCard from '@/components/admin/ApprovedAdvertiserCard'
 import RejectedAdvertiserCard from '@/components/admin/RejectedAdvertiserCard'
-import { AlertCircle, CheckCircle, RefreshCw, Shield, XCircle } from 'lucide-react'
+import { AlertCircle, BarChart3, CheckCircle, RefreshCw, Shield, XCircle } from 'lucide-react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useState } from 'react'
 
@@ -387,14 +388,23 @@ export default function AdminAdvertiserReviewPage() {
                                 </p>
                             </div>
                         </div>
-                        <button
-                            onClick={handleRefresh}
-                            disabled={isRefreshing}
-                            className="flex items-center space-x-2 px-4 py-2 bg-slate-700 text-slate-300 rounded-lg hover:bg-slate-600 disabled:opacity-50 transition-colors"
-                        >
-                            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-                            <span>새로고침</span>
-                        </button>
+                        <div className="flex items-center space-x-3">
+                            <Link
+                                href="/admin/advertiser-analytics"
+                                className="flex items-center space-x-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+                            >
+                                <BarChart3 className="w-4 h-4" />
+                                <span>현황 분석</span>
+                            </Link>
+                            <button
+                                onClick={handleRefresh}
+                                disabled={isRefreshing}
+                                className="flex items-center space-x-2 px-4 py-2 bg-slate-700 text-slate-300 rounded-lg hover:bg-slate-600 disabled:opacity-50 transition-colors"
+                            >
+                                <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                <span>새로고침</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

@@ -16,14 +16,22 @@ export async function DELETE(
             )
         }
 
+        // Authorization 헤더 전달
+        const authHeader = request.headers.get('authorization')
+
         const advertiserServiceUrl = process.env.ADVERTISER_SERVICE_URL || 'http://advertiser-service:8007'
-        const response = await fetch(`${advertiserServiceUrl}/admin/delete-advertiser/${advertiserId}`, {
+        const response = await fetch(`${advertiserServiceUrl}/admin/force-delete-advertiser/${advertiserId}`, {
             method: 'DELETE',
+            headers: {
+                'Authorization': authHeader || '',
+                'Content-Type': 'application/json',
+            },
         })
 
         if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}))
             return NextResponse.json(
-                { error: 'Failed to delete advertiser' },
+                { error: errorData.detail || 'Failed to delete advertiser' },
                 { status: response.status }
             )
         }

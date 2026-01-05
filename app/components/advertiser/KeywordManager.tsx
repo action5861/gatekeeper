@@ -15,7 +15,7 @@ interface KeywordManagerProps {
     keywords: Keyword[]
     excludedKeywords: string[]
     onKeywordsChange: (keywords: Keyword[]) => void
-    onExcludedKeywordsChange: (excludedKeywords: string[]) => void
+    onExcludedKeywordsChange: (excludedKeywords: string[], currentKeywords?: Keyword[]) => void
     isLoading?: boolean
 }
 
@@ -90,7 +90,8 @@ export default function KeywordManager({
         setIsSaving(true)
         try {
             await onKeywordsChange(localKeywords)
-            await onExcludedKeywordsChange(localExcludedKeywords)
+            // 새로 업데이트된 키워드를 함께 전달하여 덮어쓰기 방지
+            await onExcludedKeywordsChange(localExcludedKeywords, localKeywords)
         } finally {
             setIsSaving(false)
         }

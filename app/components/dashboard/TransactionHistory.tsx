@@ -15,6 +15,8 @@ const statusStyles = {
   '검증 실패': 'bg-red-500 text-red-100',
   'PENDING_VERIFICATION': 'bg-yellow-600 text-yellow-100 animate-pulse',
   'SETTLED': 'bg-green-600 text-green-100',
+  'PARTIAL_SETTLED': 'bg-orange-500 text-orange-100',
+  'FULL_SETTLED': 'bg-green-600 text-green-100',
   'FAILED': 'bg-red-600 text-red-100',
 };
 
@@ -25,7 +27,21 @@ const statusLabels = {
   '검증 실패': 'Verification Failed',
   'PENDING_VERIFICATION': 'SLA Verification Pending',
   'SETTLED': 'Settled',
+  'PARTIAL_SETTLED': 'Partial Settled',
+  'FULL_SETTLED': 'Full Settled',
   'FAILED': 'Failed',
+};
+
+// 정산 판정에 따라 Status 표시 결정
+const getDisplayStatus = (status: string, settlementDecision?: string | null): TransactionStatus => {
+  if (settlementDecision === 'PASSED') {
+    return 'FULL_SETTLED';
+  } else if (settlementDecision === 'PARTIAL') {
+    return 'PARTIAL_SETTLED';
+  } else if (settlementDecision === 'FAILED') {
+    return 'FAILED';
+  }
+  return status as TransactionStatus;
 };
 
 export function TransactionHistory({ initialTransactions }: Props) {
@@ -183,7 +199,9 @@ export function TransactionHistory({ initialTransactions }: Props) {
             </tr>
           </thead>
           <tbody>
-            {transactions.map((transaction) => (
+            {transactions.map((transaction) => {
+              const displayStatus = getDisplayStatus(transaction.status, transaction.settlementDecision);
+              return (
               <tr key={transaction.id} className="border-b border-slate-700 hover:bg-slate-700/30 transition-colors">
                 <td className="py-3 px-3 text-slate-100 font-medium">
                   {transaction.query}
@@ -202,10 +220,10 @@ export function TransactionHistory({ initialTransactions }: Props) {
                 </td>
                 <td className="py-3 px-3">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${statusStyles[transaction.status]}`}>
-                      {statusLabels[transaction.status]}
+                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${statusStyles[displayStatus] || statusStyles[transaction.status]}`}>
+                      {statusLabels[displayStatus] || statusLabels[transaction.status]}
                     </span>
-                    {getStatusIcon(transaction.status)}
+                    {getStatusIcon(displayStatus)}
                   </div>
                 </td>
                 <td className="py-3 px-3 text-slate-400 text-xs">
@@ -229,7 +247,8 @@ export function TransactionHistory({ initialTransactions }: Props) {
                   )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

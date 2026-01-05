@@ -3,8 +3,9 @@ import os
 import re
 import random
 import logging
+import asyncio
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Tuple, Optional, Literal, Annotated
+from typing import Any, Dict, List, Tuple, Optional, Literal, Annotated, cast
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request
@@ -15,6 +16,12 @@ import httpx
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from dotenv import load_dotenv
+
+# Gemini SDK for embeddings
+try:
+    from google import generativeai as genai  # type: ignore
+except ImportError:
+    genai = None  # type: ignore[assignment]
 
 # 데이터베이스
 from database import (
@@ -51,6 +58,41 @@ if DATABASE_URL:
 
 app = FastAPI(title="Advertiser Service", version="1.1.0")
 
+# ------------------------------------------------------------------------------
+# SLA Tier Rules (settlement-service와 동일하게 유지)
+# ------------------------------------------------------------------------------
+SLA_TIER_RULES = {
+    "standard": {"partial_min": 10.0, "pass_min": 20.0},
+    "deep": {"partial_min": 30.0, "pass_min": 60.0},
+    "booster": {"partial_min": 60.0, "pass_min": 90.0},
+}
+
+
+# ------------------------------------------------------------------------------
+# Gemini API 설정 (임베딩 생성용)
+# ------------------------------------------------------------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+EMBEDDING_MODEL_NAME = os.getenv("GEMINI_EMBEDDING_MODEL", "models/text-embedding-004")
+
+if genai and GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)  # type: ignore[attr-defined]
+        logger.info(
+            f"✅ Gemini API configured for embeddings (model: {EMBEDDING_MODEL_NAME})"
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to configure Gemini API: {e}")
+        genai = None
+else:
+    if not GEMINI_API_KEY:
+        logger.warning(
+            "⚠️ GEMINI_API_KEY not set - keyword embeddings will not be generated"
+        )
+    if not genai:
+        logger.warning(
+            "⚠️ google.generativeai not available - keyword embeddings will not be generated"
+        )
+
 
 # ------------------------------------------------------------------------------
 # 시작/종료 이벤트
@@ -58,6 +100,26 @@ app = FastAPI(title="Advertiser Service", version="1.1.0")
 @app.on_event("startup")
 async def startup():
     await connect_to_database()
+    # Ensure target_sla_tier column exists in auto_bid_settings
+    try:
+        await database.execute(
+            """
+            ALTER TABLE auto_bid_settings 
+            ADD COLUMN IF NOT EXISTS target_sla_tier TEXT DEFAULT 'standard'
+            CHECK (target_sla_tier IN ('standard', 'deep', 'booster'));
+            """
+        )
+        # Update existing NULL values to 'standard'
+        await database.execute(
+            """
+            UPDATE auto_bid_settings 
+            SET target_sla_tier = 'standard' 
+            WHERE target_sla_tier IS NULL;
+            """
+        )
+        logger.info("✅ target_sla_tier column ensured in auto_bid_settings")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to ensure target_sla_tier column (non-fatal): {e}")
     # 카테고리 초기 데이터 (idempotent)
     try:
         # name 컬럼에 UNIQUE 제약이 있다고 가정. 없다면 추가 권장.
@@ -101,6 +163,12 @@ async def startup():
                 "level": 1,
                 "sort_order": 13,
             },
+            {
+                "name": "비영리/공공",
+                "path": "비영리/공공",
+                "level": 1,
+                "sort_order": 14,
+            },
         ]
 
         for category in categories:
@@ -108,7 +176,7 @@ async def startup():
                 """
                 INSERT INTO business_categories (name, path, level, sort_order)
                 VALUES (:name, :path, :level, :sort_order)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (name, level) DO NOTHING
                 """,
                 category,
             )
@@ -221,6 +289,91 @@ async def get_current_advertiser(
 
     logger.info(f"Advertiser found: ID={adv['id']}, username={adv['username']}")
     return dict(adv)
+
+
+# ------------------------------------------------------------------------------
+# 임베딩 생성 함수
+# ------------------------------------------------------------------------------
+async def get_text_embedding(text: str) -> List[float]:
+    """
+    Google Gemini 임베딩 모델을 사용하여 텍스트 임베딩 벡터를 생성합니다.
+
+    - 환경변수 GEMINI_EMBEDDING_MODEL로 모델 설정 가능 (기본: models/text-embedding-004)
+    - task_type: 'retrieval_document' (DB 저장용)
+    - asyncio.to_thread()로 동기 API를 논블로킹으로 실행
+    - 실패 시 빈 리스트([]) 반환
+    """
+    if not genai or not GEMINI_API_KEY:
+        logger.warning("⚠️ Gemini API not available - skipping embedding generation")
+        return []
+
+    clean = (text or "").strip()
+    if not clean:
+        logger.warning("⚠️ 임베딩 생성 요청 텍스트가 비어있습니다.")
+        return []
+
+    def _embed_sync() -> List[float]:
+        """동기 임베딩 함수 (스레드에서 실행됨)"""
+        try:
+            # 최신 SDK 기준: genai.embed_content 사용
+            embed_fn = getattr(cast(Any, genai), "embed_content", None)
+            if not callable(embed_fn):
+                logger.error("❌ genai.embed_content 함수를 찾을 수 없습니다.")
+                return []
+
+            res = embed_fn(
+                model=EMBEDDING_MODEL_NAME,
+                content=clean,
+                task_type="retrieval_document",
+            )
+
+            # 응답 구조 방어적 파싱 (SDK 버전에 따라 다를 수 있음)
+            embedding: Any = None
+
+            # dict 형태 응답
+            if isinstance(res, dict):
+                emb = res.get("embedding")
+                if isinstance(emb, dict) and "values" in emb:
+                    embedding = emb["values"]
+                elif isinstance(emb, list):
+                    embedding = emb
+                elif "values" in res:
+                    embedding = res["values"]
+            else:
+                # 객체 형태 응답
+                emb_obj = getattr(res, "embedding", None)
+                if emb_obj is not None:
+                    if isinstance(emb_obj, list):
+                        embedding = emb_obj
+                    else:
+                        vals = getattr(emb_obj, "values", None)
+                        if vals is not None:
+                            embedding = vals
+
+            if embedding is None:
+                logger.warning("⚠️ 임베딩 응답에서 벡터를 찾지 못했습니다.")
+                return []
+
+            return list(embedding)
+        except Exception as e:
+            logger.error(f"❌ 임베딩 생성 중 오류 (sync): {e}", exc_info=True)
+            return []
+
+    try:
+        # asyncio.to_thread로 동기 함수를 논블로킹으로 실행
+        vector = await asyncio.to_thread(_embed_sync)
+
+        if not vector:
+            logger.warning(f"⚠️ 임베딩 생성 결과가 비었습니다. text='{clean[:30]}...'")
+        else:
+            logger.info(
+                f"📐 임베딩 생성 완료: 길이={len(vector)}, text='{clean[:30]}...'"
+            )
+
+        return vector
+    except Exception as e:
+        logger.error(f"❌ 임베딩 생성 중 오류 (async): {e}", exc_info=True)
+        return []
 
 
 async def get_current_admin(
@@ -348,10 +501,12 @@ class BidRange(BaseModel):
 
 
 class BusinessSetupData(BaseModel):
-    # AI 온보딩: websiteUrl만 필수, 나머지는 선택적 (AI가 자동 생성하거나 기본값 사용)
+    # websiteUrl은 필수, categories는 웹사이트 분석 단계에서는 선택적, 나머지는 선택적
     websiteUrl: str = Field(..., max_length=500)
     keywords: Optional[List[str]] = Field(None, description="키워드 목록")
-    categories: Optional[List[int]] = Field(None, description="카테고리 ID 목록")
+    categories: Optional[List[int]] = Field(
+        None, description="표준 카테고리 ID 목록 (웹사이트 분석 단계에서는 선택적)"
+    )
     dailyBudget: Optional[int] = Field(None, ge=1000, le=10000000)
     bidRange: Optional[BidRange] = None
 
@@ -378,6 +533,8 @@ class BusinessSetupData(BaseModel):
     def validate_categories(cls, v):
         if v is None:
             return v
+        if len(v) == 0:
+            raise ValueError("최소 1개 이상의 카테고리를 선택해야 합니다")
         if len(v) > 50:
             raise ValueError("카테고리는 최대 50개까지 선택 가능합니다")
         for cid in v:
@@ -411,11 +568,25 @@ class AutoBidSettingsUpdate(BaseModel):
     is_enabled: bool = Field(
         True, alias="isEnabled", description="자동 입찰 활성화 여부"
     )
+    target_sla_tier: Annotated[
+        str,
+        Field(
+            default="standard",
+            alias="targetSlaTier",
+            description="SLA Tier: standard (20s+), deep (60s+), booster (90s+)",
+        ),
+    ] = "standard"
     excluded_keywords: Optional[List[str]] = Field(
         default=None,
         alias="excludedKeywords",
         description="제외 키워드 목록",
     )
+
+    @validator("target_sla_tier")
+    def validate_sla_tier(cls, v):
+        if v not in ["standard", "deep", "booster"]:
+            raise ValueError("target_sla_tier must be one of: standard, deep, booster")
+        return v
 
     @validator("excluded_keywords", pre=True, always=True)
     def ensure_list(cls, value: Optional[Any]) -> List[str]:
@@ -595,29 +766,57 @@ async def save_business_setup_data(
         # 키워드 (사용자가 직접 입력한 키워드) - AI 온보딩 시에는 None일 수 있음
         if business_setup.keywords:
             for keyword in business_setup.keywords:
-                await database.execute(
-                    """
-                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, source)
-                    VALUES (:advertiser_id, :keyword, :priority, :match_type, :source)
-                    """,
-                    {
-                        "advertiser_id": advertiser_id,
-                        "keyword": keyword,
-                        "priority": 1,
-                        "match_type": "broad",
-                        "source": "user_added",
-                    },
-                )
+                # 임베딩 생성 시도
+                embedding_vector = await get_text_embedding(keyword)
 
-        # 카테고리 (사용자가 직접 선택한 카테고리) - AI 온보딩 시에는 None일 수 있음
+                if embedding_vector:
+                    # 임베딩 성공: pgvector 형식으로 저장
+                    embedding_str = str(embedding_vector)
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, source, embedding)
+                        VALUES (:advertiser_id, :keyword, :priority, :match_type, :source, CAST(:embedding AS vector))
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "keyword": keyword,
+                            "priority": 1,
+                            "match_type": "broad",
+                            "source": "user_added",
+                            "embedding": embedding_str,
+                        },
+                    )
+                else:
+                    # 임베딩 실패: 키워드만 저장
+                    await database.execute(
+                        """
+                        INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, source)
+                        VALUES (:advertiser_id, :keyword, :priority, :match_type, :source)
+                        """,
+                        {
+                            "advertiser_id": advertiser_id,
+                            "keyword": keyword,
+                            "priority": 1,
+                            "match_type": "broad",
+                            "source": "user_added",
+                        },
+                    )
+
+        # 카테고리 (사용자가 표준 카테고리에서 직접 선택한 카테고리) - 필수
+        primary_category_name = None
         if business_setup.categories:
-            for category_id in business_setup.categories:
+            for idx, category_id in enumerate(business_setup.categories):
                 try:
                     info = await database.fetch_one(
                         "SELECT name, path, level FROM business_categories WHERE id = :id",
                         {"id": category_id},
                     )
                     if info:
+                        # 첫 번째 카테고리를 primary로 설정
+                        is_primary = idx == 0
+                        if is_primary:
+                            primary_category_name = info["name"]
+
                         await database.execute(
                             """
                             INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
@@ -627,38 +826,31 @@ async def save_business_setup_data(
                                 "advertiser_id": advertiser_id,
                                 "path": info["path"],
                                 "level": info["level"],
-                                "is_primary": False,
+                                "is_primary": is_primary,
                                 "source": "user_added",
                             },
                         )
                     else:
-                        await database.execute(
-                            """
-                            INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
-                            VALUES (:advertiser_id, :path, :level, :is_primary, :source)
-                            """,
-                            {
-                                "advertiser_id": advertiser_id,
-                                "path": f"Unknown Category {category_id}",
-                                "level": 1,
-                                "is_primary": False,
-                                "source": "user_added",
-                            },
-                        )
-                except Exception:
-                    await database.execute(
-                        """
-                        INSERT INTO advertiser_categories (advertiser_id, category_path, category_level, is_primary, source)
-                        VALUES (:advertiser_id, :path, :level, :is_primary, :source)
-                        """,
-                        {
-                            "advertiser_id": advertiser_id,
-                            "path": f"Category {category_id}",
-                            "level": 1,
-                            "is_primary": False,
-                            "source": "user_added",
-                        },
-                    )
+                        logger.warning(f"카테고리 ID {category_id}를 찾을 수 없습니다.")
+                except Exception as e:
+                    logger.error(f"카테고리 저장 중 오류: {e}", exc_info=True)
+
+        # 첫 번째 선택한 카테고리를 advertisers.category 컬럼에도 저장 (매칭 로직에서 사용)
+        if primary_category_name:
+            await database.execute(
+                """
+                UPDATE advertisers
+                SET category = :category
+                WHERE id = :advertiser_id
+                """,
+                {
+                    "advertiser_id": advertiser_id,
+                    "category": primary_category_name,
+                },
+            )
+            logger.info(
+                f"✅ 광고주 #{advertiser_id}의 표준 카테고리 설정: '{primary_category_name}'"
+            )
 
         # 자동 입찰 초기 설정 - AI 온보딩 시 기본값 사용
         import json
@@ -923,18 +1115,43 @@ async def confirm_suggestions(
 
         # 수정된 키워드 저장 (source를 'user_confirmed'로 변경)
         for kw in keywords:
-            await database.execute(
-                """
-                INSERT INTO advertiser_keywords (advertiser_id, keyword, source, match_type, priority)
-                VALUES (:advertiser_id, :keyword, 'user_confirmed', :match_type, :priority)
-                """,
-                {
-                    "advertiser_id": advertiser_id,
-                    "keyword": kw.get("keyword"),
-                    "match_type": kw.get("match_type", "broad"),
-                    "priority": kw.get("priority", 1),
-                },
-            )
+            keyword_text = kw.get("keyword")
+            if not keyword_text:
+                continue
+
+            # 임베딩 생성 시도
+            embedding_vector = await get_text_embedding(keyword_text)
+
+            if embedding_vector:
+                # 임베딩 성공: pgvector 형식으로 저장
+                embedding_str = str(embedding_vector)
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, source, match_type, priority, embedding)
+                    VALUES (:advertiser_id, :keyword, 'user_confirmed', :match_type, :priority, CAST(:embedding AS vector))
+                    """,
+                    {
+                        "advertiser_id": advertiser_id,
+                        "keyword": keyword_text,
+                        "match_type": kw.get("match_type", "broad"),
+                        "priority": kw.get("priority", 1),
+                        "embedding": embedding_str,
+                    },
+                )
+            else:
+                # 임베딩 실패: 키워드만 저장
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, source, match_type, priority)
+                    VALUES (:advertiser_id, :keyword, 'user_confirmed', :match_type, :priority)
+                    """,
+                    {
+                        "advertiser_id": advertiser_id,
+                        "keyword": keyword_text,
+                        "match_type": kw.get("match_type", "broad"),
+                        "priority": kw.get("priority", 1),
+                    },
+                )
 
         # 수정된 카테고리 저장 (source를 'user_confirmed'로 변경)
         for cat in categories:
@@ -1230,13 +1447,37 @@ async def update_advertiser_data(
             {"id": advertiser_id},
         )
         for kw in keywords:
-            await database.execute(
-                """
-                INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
-                VALUES (:id, :kw, :priority, :mt)
-                """,
-                {"id": advertiser_id, "kw": kw, "priority": 1, "mt": "broad"},
-            )
+            if not kw or not kw.strip():
+                continue
+
+            # 임베딩 생성 시도
+            embedding_vector = await get_text_embedding(kw)
+
+            if embedding_vector:
+                # 임베딩 성공: pgvector 형식으로 저장
+                embedding_str = str(embedding_vector)
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, embedding)
+                    VALUES (:id, :kw, :priority, :mt, CAST(:embedding AS vector))
+                    """,
+                    {
+                        "id": advertiser_id,
+                        "kw": kw,
+                        "priority": 1,
+                        "mt": "broad",
+                        "embedding": embedding_str,
+                    },
+                )
+            else:
+                # 임베딩 실패: 키워드만 저장
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
+                    VALUES (:id, :kw, :priority, :mt)
+                    """,
+                    {"id": advertiser_id, "kw": kw, "priority": 1, "mt": "broad"},
+                )
 
         await database.execute(
             "DELETE FROM advertiser_categories WHERE advertiser_id = :id",
@@ -1320,28 +1561,18 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
         logger.info(f"Processed advertiser_data: {advertiser_data}")
 
         if review_status == "approved":
-            # 1) 입찰 요약 (정산 금액 기준)
+            # 1) 입찰 요약 (정산 금액 기준 - SSOT: bids.settled_amount 사용)
             bid_summary = await database.fetch_one(
                 """
                 SELECT 
-                    COUNT(DISTINCT abl.id) as total_bids,
-                    COUNT(DISTINCT CASE WHEN abl.bid_result = 'won' OR s.verification_decision IS NOT NULL THEN abl.id END) as successful_bids,
-                    COALESCE(SUM(COALESCE(s.payable_amount, 0)), 0) as total_spent,
-                    COALESCE(AVG(abl.bid_amount), 0) as avg_bid_amount
-                FROM auto_bid_logs abl
-                LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
-                    AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
-                    AND ABS(b.price - abl.bid_amount) < 10
-                LEFT JOIN LATERAL (
-                    SELECT t.id, t.bid_id
-                    FROM transactions t
-                    WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
-                    ORDER BY t.created_at DESC
-                    LIMIT 1
-                ) t ON TRUE
-                LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
-                WHERE abl.advertiser_id = :id
-                  AND abl.created_at >= CURRENT_DATE - INTERVAL '30 days'
+                    COUNT(*) as total_bids,
+                    COUNT(CASE WHEN b.settlement_decision IN ('PASSED', 'PARTIAL') AND b.settled_amount > 0 THEN 1 END) as successful_bids,
+                    COALESCE(SUM(COALESCE(b.settled_amount, 0)), 0) as total_spent,
+                    COALESCE(AVG(b.price), 0) as avg_bid_amount
+                FROM bids b
+                WHERE b.advertiser_id = :id
+                  AND b.type = 'ADVERTISER'
+                  AND b.created_at >= CURRENT_DATE - INTERVAL '30 days'
                 """,
                 {"id": advertiser_id},
             )
@@ -1362,21 +1593,11 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
             )
             today_spent_row = await database.fetch_one(
                 """
-                SELECT COALESCE(SUM(COALESCE(s.payable_amount, 0)), 0) as today_spent
-                FROM auto_bid_logs abl
-                LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
-                    AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
-                    AND ABS(b.price - abl.bid_amount) < 10
-                LEFT JOIN LATERAL (
-                    SELECT t.id, t.bid_id
-                    FROM transactions t
-                    WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
-                    ORDER BY t.created_at DESC
-                    LIMIT 1
-                ) t ON TRUE
-                LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
-                WHERE abl.advertiser_id = :id
-                  AND DATE(abl.created_at) = CURRENT_DATE
+                SELECT COALESCE(SUM(COALESCE(b.settled_amount, 0)), 0) as today_spent
+                FROM bids b
+                WHERE b.advertiser_id = :id
+                  AND b.type = 'ADVERTISER'
+                  AND b.created_at >= CURRENT_DATE
                 """,
                 {"id": advertiser_id},
             )
@@ -1413,26 +1634,33 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
                         t.id as transaction_id,
                         t.user_id,
                         t.primary_reward,
+                        COALESCE(t.target_sla_tier, 'standard') as target_sla_tier,
                         ROW_NUMBER() OVER (PARTITION BY abl.id ORDER BY abl.created_at DESC) as rn
                     FROM auto_bid_logs abl
                     LEFT JOIN bids b ON b.advertiser_id = abl.advertiser_id 
                         AND ABS(EXTRACT(EPOCH FROM (b.created_at - abl.created_at))) < 300
                         AND ABS(b.price - abl.bid_amount) < 10
                     LEFT JOIN LATERAL (
-                        SELECT t.id, t.user_id, t.bid_id, t.primary_reward
+                        SELECT t.id, t.user_id, t.bid_id, t.primary_reward, COALESCE(t.target_sla_tier, 'standard') as target_sla_tier
                         FROM transactions t
                         WHERE (t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query))
                         ORDER BY t.created_at DESC
                         LIMIT 1
                     ) t ON TRUE
                     LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
-                    LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                    LEFT JOIN LATERAL (
+                        SELECT verification_decision, payable_amount
+                        FROM settlements
+                        WHERE trade_id = COALESCE(t.bid_id, t.id)
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) s ON TRUE
                     WHERE abl.advertiser_id = :id
                 )
                 SELECT 
                     id, search_query, amount, timestamp, status, bid_id,
                     settlement_decision, settled_amount, v_atf, clicked,
-                    t_dwell_on_ad_site, transaction_id, user_id, primary_reward
+                    t_dwell_on_ad_site, transaction_id, user_id, primary_reward, target_sla_tier
                 FROM ranked_bids
                 WHERE rn = 1
                 ORDER BY timestamp DESC
@@ -1456,55 +1684,66 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
                     if bid["primary_reward"]
                     else float(bid["amount"])  # primary_reward가 없으면 입찰 금액 사용
                 )
-                
+
+                # SLA tier 결정
+                bid_dict = dict(bid) if bid else {}
+                tier_name = bid_dict.get("target_sla_tier", "standard") or "standard"
+                if tier_name not in SLA_TIER_RULES:
+                    tier_name = "standard"
+                tier_rules = SLA_TIER_RULES[tier_name]
+                partial_min = tier_rules["partial_min"]
+                pass_min = tier_rules["pass_min"]
+
                 # 정산 영수증 API와 동일한 재계산 로직 적용
-                # delivery_metrics의 실제 데이터를 기반으로 판정을 재계산
+                # delivery_metrics의 실제 데이터를 기반으로 판정을 재계산 (SLA tier 고려)
                 recalculated_decision = None
                 if clicked and v_atf >= 0.3:
-                    if t_dwell_on_ad_site >= 20.0:
+                    if t_dwell_on_ad_site >= pass_min:
                         recalculated_decision = "PASSED"
-                    elif t_dwell_on_ad_site > 3.0:
+                    elif t_dwell_on_ad_site >= partial_min:
                         recalculated_decision = "PARTIAL"
                     else:
                         recalculated_decision = "FAILED"
                 else:
                     recalculated_decision = "FAILED"
-                
+
                 # settlements 테이블의 decision이 있으면 우선 사용, 없으면 재계산된 값 사용
                 final_decision = (
                     bid["settlement_decision"]
                     if bid["settlement_decision"]
                     else recalculated_decision
                 )
-                
+
                 # 재계산된 판정이 더 정확하면 그것을 사용 (settlements의 decision이 없거나, 재계산 결과가 다르면)
                 if not bid["settlement_decision"] or (
                     recalculated_decision
                     and recalculated_decision != bid["settlement_decision"]
                 ):
                     final_decision = recalculated_decision
-                
+
                 # 정산 정보가 있는 경우 (decision이 있거나 delivery_metrics가 있는 경우)
                 if final_decision or (v_atf > 0 or clicked or t_dwell_on_ad_site > 0):
-                    # 정산 금액 재계산
+                    # 정산 금액 재계산 (SLA tier 기준 사용)
                     recalculated_amount = 0.0
                     if final_decision == "PASSED":
                         # 전액 지급
                         recalculated_amount = primary_reward
                     elif final_decision == "PARTIAL":
-                        # 선형 보상 계산: 3초 = 25%, 20초 = 100%로 선형 보간
-                        if t_dwell_on_ad_site <= 3.0:
+                        # 선형 보상 계산: partial_min = 50%, pass_min = 100%로 선형 보간
+                        if t_dwell_on_ad_site < partial_min:
                             ratio = 0.0
-                        elif t_dwell_on_ad_site >= 20.0:
+                        elif t_dwell_on_ad_site >= pass_min:
                             ratio = 1.0
                         else:
-                            # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
-                            ratio = 0.25 + 0.75 * (t_dwell_on_ad_site - 3.0) / (20.0 - 3.0)
+                            # 공식: 0.5 + 0.5 * (dwell - partial_min) / (pass_min - partial_min)
+                            ratio = 0.5 + 0.5 * (t_dwell_on_ad_site - partial_min) / (
+                                pass_min - partial_min
+                            )
                             ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
                         recalculated_amount = primary_reward * ratio
                     else:  # FAILED
                         recalculated_amount = 0.0
-                    
+
                     # settlements 테이블의 금액이 있고 판정이 같으면 그것을 사용, 아니면 재계산된 금액 사용
                     final_amount = (
                         float(bid["settled_amount"])
@@ -1512,7 +1751,7 @@ async def get_dashboard(current_advertiser: dict = Depends(get_current_advertise
                         and bid["settlement_decision"] == final_decision
                         else recalculated_amount
                     )
-                    
+
                     settlement_info = {
                         "decision": final_decision or "FAILED",
                         "settled_amount": final_amount,
@@ -1757,7 +1996,7 @@ async def get_auto_bid_settings(advertiser_id: int):
         settings = await database.fetch_one(
             """
             SELECT is_enabled, daily_budget, max_bid_per_keyword, 
-                   min_quality_score, preferred_categories, excluded_keywords
+                   min_quality_score, COALESCE(target_sla_tier, 'standard') as target_sla_tier, preferred_categories, excluded_keywords
             FROM auto_bid_settings WHERE advertiser_id = :id
             """,
             {"id": advertiser_id},
@@ -1768,13 +2007,14 @@ async def get_auto_bid_settings(advertiser_id: int):
                 "daily_budget": 10000.0,
                 "max_bid_per_keyword": 3000,
                 "min_quality_score": 50,
+                "target_sla_tier": "standard",
                 "preferred_categories": [],
                 "excluded_keywords": [],
             }
             await database.execute(
                 """
-                INSERT INTO auto_bid_settings (advertiser_id, is_enabled, daily_budget, max_bid_per_keyword, min_quality_score)
-                VALUES (:id, :en, :db, :maxb, :minq)
+                INSERT INTO auto_bid_settings (advertiser_id, is_enabled, daily_budget, max_bid_per_keyword, min_quality_score, target_sla_tier)
+                VALUES (:id, :en, :db, :maxb, :minq, :tier)
                 """,
                 {
                     "id": advertiser_id,
@@ -1782,6 +2022,7 @@ async def get_auto_bid_settings(advertiser_id: int):
                     "db": 10000.0,
                     "maxb": 3000,
                     "minq": 50,
+                    "tier": "standard",
                 },
             )
             return default_settings
@@ -1806,6 +2047,16 @@ async def update_auto_bid_settings(
         max_bid_per_keyword = int(payload.max_bid_per_keyword)
         min_quality_score = int(payload.min_quality_score)
         is_enabled = bool(payload.is_enabled)
+        target_sla_tier = payload.target_sla_tier or "standard"
+
+        # Tier별 최소 입찰가 검증
+        tier_min_bids = {"standard": 1000, "deep": 3000, "booster": 6000}
+        min_bid_for_tier = tier_min_bids.get(target_sla_tier, 1000)
+        if max_bid_per_keyword < min_bid_for_tier:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{target_sla_tier} tier requires minimum bid of {min_bid_for_tier} KRW. Current: {max_bid_per_keyword} KRW",
+            )
 
         await database.execute(
             """
@@ -1815,16 +2066,18 @@ async def update_auto_bid_settings(
                 max_bid_per_keyword,
                 min_quality_score,
                 is_enabled,
+                target_sla_tier,
                 excluded_keywords,
                 created_at,
                 updated_at
             )
-            VALUES (:id, :db, :maxb, :minq, :en, :exk, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (:id, :db, :maxb, :minq, :en, :tier, :exk, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT (advertiser_id) DO UPDATE
             SET daily_budget = EXCLUDED.daily_budget,
                 max_bid_per_keyword = EXCLUDED.max_bid_per_keyword,
                 min_quality_score = EXCLUDED.min_quality_score,
                 is_enabled = EXCLUDED.is_enabled,
+                target_sla_tier = EXCLUDED.target_sla_tier,
                 excluded_keywords = EXCLUDED.excluded_keywords,
                 updated_at = CURRENT_TIMESTAMP
             """,
@@ -1834,6 +2087,7 @@ async def update_auto_bid_settings(
                 "maxb": max_bid_per_keyword,
                 "minq": min_quality_score,
                 "en": is_enabled,
+                "tier": target_sla_tier,
                 "exk": excluded_keywords,
             },
         )
@@ -1841,7 +2095,7 @@ async def update_auto_bid_settings(
         updated = await database.fetch_one(
             """
             SELECT advertiser_id, is_enabled, daily_budget, max_bid_per_keyword,
-                   min_quality_score, excluded_keywords, updated_at
+                   min_quality_score, target_sla_tier, excluded_keywords, updated_at
             FROM auto_bid_settings
             WHERE advertiser_id = :id
             """,
@@ -1853,11 +2107,12 @@ async def update_auto_bid_settings(
             )
 
         logger.info(
-            "Auto bid settings updated for advertiser_id=%s: budget=%s, max_bid=%s, min_quality=%s, enabled=%s",
+            "Auto bid settings updated for advertiser_id=%s: budget=%s, max_bid=%s, min_quality=%s, tier=%s, enabled=%s",
             advertiser_id,
             daily_budget,
             max_bid_per_keyword,
             min_quality_score,
+            target_sla_tier,
             is_enabled,
         )
 
@@ -1951,20 +2206,54 @@ async def update_advertiser_keywords(advertiser_id: int, request: Request):
             "DELETE FROM advertiser_keywords WHERE advertiser_id = :id",
             {"id": advertiser_id},
         )
+
+        embedding_count = 0
         for item in normalized_keywords:
-            await database.execute(
-                """
-                INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
-                VALUES (:id, :kw, :priority, :mt)
-                """,
-                {
-                    "id": advertiser_id,
-                    "kw": item["keyword"],
-                    "priority": item["priority"],
-                    "mt": item["match_type"],
-                },
-            )
-        return {"success": True, "message": "키워드가 업데이트되었습니다"}
+            keyword_text = item["keyword"]
+
+            # 임베딩 생성 시도
+            embedding_vector = await get_text_embedding(keyword_text)
+
+            if embedding_vector:
+                # 임베딩 성공: pgvector 형식으로 저장
+                embedding_str = str(embedding_vector)
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type, embedding)
+                    VALUES (:id, :kw, :priority, :mt, CAST(:embedding AS vector))
+                    """,
+                    {
+                        "id": advertiser_id,
+                        "kw": keyword_text,
+                        "priority": item["priority"],
+                        "mt": item["match_type"],
+                        "embedding": embedding_str,
+                    },
+                )
+                embedding_count += 1
+                logger.info(
+                    f"✅ 키워드+임베딩 저장: '{keyword_text}' (광고주 #{advertiser_id})"
+                )
+            else:
+                # 임베딩 실패: 키워드만 저장 (embedding = NULL)
+                await database.execute(
+                    """
+                    INSERT INTO advertiser_keywords (advertiser_id, keyword, priority, match_type)
+                    VALUES (:id, :kw, :priority, :mt)
+                    """,
+                    {
+                        "id": advertiser_id,
+                        "kw": keyword_text,
+                        "priority": item["priority"],
+                        "mt": item["match_type"],
+                    },
+                )
+                logger.warning(
+                    f"⚠️ 키워드만 저장 (임베딩 실패): '{keyword_text}' (광고주 #{advertiser_id})"
+                )
+
+        message = f"키워드가 업데이트되었습니다 (임베딩 생성: {embedding_count}/{len(normalized_keywords)})"
+        return {"success": True, "message": message}
     except HTTPException:
         raise
     except Exception as e:
@@ -2127,6 +2416,7 @@ async def get_settlement_receipt(
                 t.id as transaction_id,
                 t.user_id,
                 t.primary_reward,
+                COALESCE(t.target_sla_tier, 'standard') as target_sla_tier,
                 COALESCE(s.verification_decision, NULL) as decision,
                 COALESCE(s.payable_amount, NULL) as settled_amount,
                 COALESCE(s.settled_at, NULL) as settled_at,
@@ -2138,7 +2428,13 @@ async def get_settlement_receipt(
             LEFT JOIN auctions a ON a.id = b.auction_id
             LEFT JOIN transactions t ON t.bid_id = b.id
             LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
-            LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+            LEFT JOIN LATERAL (
+                SELECT verification_decision, payable_amount, settled_at
+                FROM settlements
+                WHERE trade_id = COALESCE(t.bid_id, t.id)
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) s ON TRUE
             WHERE b.id = :bid_id AND b.advertiser_id = :advertiser_id
             """,
             {"bid_id": bid_id, "advertiser_id": advertiser_id},
@@ -2159,6 +2455,7 @@ async def get_settlement_receipt(
                         t.id as transaction_id,
                         t.user_id,
                         t.primary_reward,
+                        COALESCE(t.target_sla_tier, 'standard') as target_sla_tier,
                         COALESCE(s.verification_decision, NULL) as decision,
                         COALESCE(s.payable_amount, NULL) as settled_amount,
                         COALESCE(s.settled_at, NULL) as settled_at,
@@ -2172,7 +2469,13 @@ async def get_settlement_receipt(
                         AND ABS(b.price - abl.bid_amount) < 10
                     LEFT JOIN transactions t ON t.bid_id = b.id OR (t.advertiser_id = abl.advertiser_id AND t.query_text = abl.search_query)
                     LEFT JOIN delivery_metrics dm ON dm.trade_id = COALESCE(t.bid_id, t.id)
-                    LEFT JOIN settlements s ON s.trade_id = COALESCE(t.bid_id, t.id)
+                    LEFT JOIN LATERAL (
+                        SELECT verification_decision, payable_amount, settled_at
+                        FROM settlements
+                        WHERE trade_id = COALESCE(t.bid_id, t.id)
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) s ON TRUE
                     WHERE abl.id = :auto_bid_log_id AND abl.advertiser_id = :advertiser_id
                     """,
                     {
@@ -2200,6 +2503,9 @@ async def get_settlement_receipt(
                         "clicked": auto_bid_dict.get("clicked"),
                         "t_dwell_on_ad_site": auto_bid_dict.get("t_dwell_on_ad_site"),
                         "metrics_created_at": auto_bid_dict.get("metrics_created_at"),
+                        "target_sla_tier": auto_bid_dict.get(
+                            "target_sla_tier", "standard"
+                        ),
                     }
             except (ValueError, TypeError):
                 pass
@@ -2246,12 +2552,21 @@ async def get_settlement_receipt(
             else 0.0
         )
 
-        # 실제 SLA 지표를 기반으로 판정 재계산
+        # SLA tier 결정
+        settlement_dict = dict(settlement_data) if settlement_data else {}
+        tier_name = settlement_dict.get("target_sla_tier", "standard") or "standard"
+        if tier_name not in SLA_TIER_RULES:
+            tier_name = "standard"
+        tier_rules = SLA_TIER_RULES[tier_name]
+        partial_min = tier_rules["partial_min"]
+        pass_min = tier_rules["pass_min"]
+
+        # 실제 SLA 지표를 기반으로 판정 재계산 (SLA tier 고려)
         recalculated_decision = None
         if clicked and v_atf >= 0.3:
-            if t_dwell_on_ad_site >= 20.0:
+            if t_dwell_on_ad_site >= pass_min:
                 recalculated_decision = "PASSED"
-            elif t_dwell_on_ad_site > 3.0:
+            elif t_dwell_on_ad_site >= partial_min:
                 recalculated_decision = "PARTIAL"
             else:
                 recalculated_decision = "FAILED"
@@ -2272,20 +2587,22 @@ async def get_settlement_receipt(
         ):
             final_decision = recalculated_decision
 
-        # 정산 금액 재계산
+        # 정산 금액 재계산 (SLA tier 기준 사용)
         recalculated_amount = 0.0
         if final_decision == "PASSED":
             # 전액 지급
             recalculated_amount = primary_reward
         elif final_decision == "PARTIAL":
-            # 선형 보상 계산: 3초 = 25%, 20초 = 100%로 선형 보간
-            if t_dwell_on_ad_site <= 3.0:
+            # 선형 보상 계산: partial_min = 50%, pass_min = 100%로 선형 보간
+            if t_dwell_on_ad_site < partial_min:
                 ratio = 0.0
-            elif t_dwell_on_ad_site >= 20.0:
+            elif t_dwell_on_ad_site >= pass_min:
                 ratio = 1.0
             else:
-                # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
-                ratio = 0.25 + 0.75 * (t_dwell_on_ad_site - 3.0) / (20.0 - 3.0)
+                # 공식: 0.5 + 0.5 * (dwell - partial_min) / (pass_min - partial_min)
+                ratio = 0.5 + 0.5 * (t_dwell_on_ad_site - partial_min) / (
+                    pass_min - partial_min
+                )
                 ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
             recalculated_amount = primary_reward * ratio
         else:  # FAILED
@@ -2959,6 +3276,7 @@ async def get_business_categories():
 async def delete_advertiser(
     advertiser_id: int, admin_user: dict = Depends(get_current_admin)
 ):
+    """거절된 광고주만 삭제 가능 (기존 호환성 유지)"""
     try:
         status_row = await database.fetch_val(
             "SELECT review_status FROM advertiser_reviews WHERE advertiser_id = :id",
@@ -2982,6 +3300,304 @@ async def delete_advertiser(
         logger.exception("delete_advertiser error: %r", e)
         raise HTTPException(
             status_code=500, detail=f"Failed to delete advertiser: {str(e)}"
+        )
+
+
+@app.delete("/admin/force-delete-advertiser/{advertiser_id}")
+async def force_delete_advertiser(
+    advertiser_id: int, admin_user: dict = Depends(get_current_admin)
+):
+    """관리자가 모든 상태의 광고주를 삭제 (관련 데이터 포함)"""
+    try:
+        # 광고주 존재 확인
+        adv = await database.fetch_one(
+            "SELECT id, company_name FROM advertisers WHERE id = :id",
+            {"id": advertiser_id},
+        )
+        if not adv:
+            raise HTTPException(status_code=404, detail="Advertiser not found")
+
+        company_name = adv["company_name"]
+
+        async with database.transaction():
+            # 관련 데이터 삭제 (CASCADE가 없을 경우를 대비)
+            await database.execute(
+                "DELETE FROM advertiser_keywords WHERE advertiser_id = :id",
+                {"id": advertiser_id},
+            )
+            await database.execute(
+                "DELETE FROM advertiser_categories WHERE advertiser_id = :id",
+                {"id": advertiser_id},
+            )
+            await database.execute(
+                "DELETE FROM advertiser_reviews WHERE advertiser_id = :id",
+                {"id": advertiser_id},
+            )
+            await database.execute(
+                "DELETE FROM auto_bid_settings WHERE advertiser_id = :id",
+                {"id": advertiser_id},
+            )
+            await database.execute(
+                "DELETE FROM advertiser_daily_spend WHERE advertiser_id = :id",
+                {"id": advertiser_id},
+            )
+            # 최종 광고주 삭제
+            await database.execute(
+                "DELETE FROM advertisers WHERE id = :id", {"id": advertiser_id}
+            )
+
+        logger.info(
+            f"Advertiser {advertiser_id} ({company_name}) deleted by admin {admin_user.get('username')}"
+        )
+        return {
+            "success": True,
+            "message": f"광고주 '{company_name}'이(가) 삭제되었습니다.",
+            "deleted_id": advertiser_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("force_delete_advertiser error: %r", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete advertiser: {str(e)}"
+        )
+
+
+# ------------------------------------------------------------------------------
+# 관리자용 광고주 분석 API
+# ------------------------------------------------------------------------------
+
+
+class AdvertiserAnalytics(BaseModel):
+    """광고주 분석 데이터"""
+
+    advertiser_id: int
+    company_name: str
+    email: str
+    website_url: Optional[str]
+    review_status: str
+    daily_budget: int
+    total_bids: int
+    total_spend: int
+    total_settlements: int
+    success_rate: float
+    avg_bid_price: float
+    avg_dwell_time: float
+    last_bid_date: Optional[str]
+    created_at: str
+
+
+class AnalyticsSummary(BaseModel):
+    """전체 요약 통계"""
+
+    total_advertisers: int
+    active_advertisers: int
+    pending_advertisers: int
+    rejected_advertisers: int
+    total_bids: int
+    total_spend: int
+    total_settlements: int
+    avg_success_rate: float
+    avg_bid_price: float
+
+
+@app.get("/admin/analytics")
+async def get_admin_analytics(timeRange: str = "week"):
+    """
+    관리자용 광고주 전체 현황 분석
+    - 모든 광고주의 정산 현황
+    - 입찰 성과 분석
+    - 지출 현황
+    """
+    try:
+        # 기간 설정
+        if timeRange == "day":
+            interval = "1 day"
+        elif timeRange == "week":
+            interval = "7 days"
+        elif timeRange == "month":
+            interval = "30 days"
+        else:
+            interval = "7 days"
+
+        # 1. 전체 광고주 목록 및 기본 정보
+        advertisers_query = """
+            SELECT 
+                a.id as advertiser_id,
+                a.company_name,
+                a.email,
+                a.website_url,
+                a.created_at,
+                COALESCE(ar.review_status, 'pending') as review_status,
+                COALESCE(abs.daily_budget, 0) as daily_budget,
+                COALESCE(abs.max_bid_per_keyword, 0) as max_bid_per_keyword,
+                COALESCE(abs.is_enabled, false) as is_enabled
+            FROM advertisers a
+            LEFT JOIN advertiser_reviews ar ON a.id = ar.advertiser_id
+            LEFT JOIN auto_bid_settings abs ON a.id = abs.advertiser_id
+            ORDER BY a.created_at DESC
+        """
+        advertisers = await database.fetch_all(advertisers_query)
+
+        # 2. 각 광고주별 입찰/정산 통계
+        advertiser_stats = {}
+
+        for adv in advertisers:
+            adv_id = adv["advertiser_id"]
+
+            # 입찰 통계 (INTERVAL은 직접 문자열로 삽입 - 값은 고정된 안전한 값임)
+            bids_query = f"""
+                SELECT 
+                    COUNT(*) as total_bids,
+                    COALESCE(SUM(price), 0) as total_spend,
+                    COALESCE(AVG(price), 0) as avg_bid_price,
+                    MAX(created_at) as last_bid_date
+                FROM bids
+                WHERE advertiser_id = :adv_id
+                  AND created_at >= NOW() - INTERVAL '{interval}'
+            """
+            bids_stats = await database.fetch_one(bids_query, {"adv_id": adv_id})
+
+            # 정산 통계
+            settlements_query = f"""
+                SELECT 
+                    COUNT(*) as total_settlements,
+                    COALESCE(SUM(payable_amount), 0) as total_payable,
+                    COUNT(CASE WHEN verification_decision = 'PASSED' THEN 1 END) as passed_count,
+                    COUNT(CASE WHEN verification_decision = 'PARTIAL' THEN 1 END) as partial_count,
+                    COUNT(CASE WHEN verification_decision = 'FAILED' THEN 1 END) as failed_count
+                FROM settlements s
+                JOIN bids b ON s.trade_id = b.id
+                WHERE b.advertiser_id = :adv_id
+                  AND s.settled_at >= NOW() - INTERVAL '{interval}'
+            """
+            settlement_stats = await database.fetch_one(
+                settlements_query, {"adv_id": adv_id}
+            )
+
+            # 평균 체류 시간
+            dwell_query = f"""
+                SELECT COALESCE(AVG(dm.t_dwell_on_ad_site), 0) as avg_dwell
+                FROM delivery_metrics dm
+                JOIN bids b ON dm.trade_id = b.id
+                WHERE b.advertiser_id = :adv_id
+                  AND dm.created_at >= NOW() - INTERVAL '{interval}'
+            """
+            dwell_stats = await database.fetch_one(dwell_query, {"adv_id": adv_id})
+
+            total_bids = bids_stats["total_bids"] if bids_stats else 0
+            passed = settlement_stats["passed_count"] if settlement_stats else 0
+            partial = settlement_stats["partial_count"] if settlement_stats else 0
+            total_settlements = (
+                settlement_stats["total_settlements"] if settlement_stats else 0
+            )
+
+            success_rate = 0.0
+            if total_settlements > 0:
+                success_rate = ((passed + partial * 0.5) / total_settlements) * 100
+
+            advertiser_stats[adv_id] = {
+                "total_bids": total_bids,
+                "total_spend": int(bids_stats["total_spend"]) if bids_stats else 0,
+                "total_settlements": total_settlements,
+                "total_payable": (
+                    int(settlement_stats["total_payable"]) if settlement_stats else 0
+                ),
+                "success_rate": round(success_rate, 1),
+                "avg_bid_price": (
+                    round(float(bids_stats["avg_bid_price"]), 0) if bids_stats else 0
+                ),
+                "avg_dwell_time": (
+                    round(float(dwell_stats["avg_dwell"]), 1) if dwell_stats else 0
+                ),
+                "last_bid_date": (
+                    bids_stats["last_bid_date"].isoformat()
+                    if bids_stats and bids_stats["last_bid_date"]
+                    else None
+                ),
+                "passed_count": passed,
+                "partial_count": partial,
+                "failed_count": (
+                    settlement_stats["failed_count"] if settlement_stats else 0
+                ),
+            }
+
+        # 3. 결과 조합
+        result_advertisers = []
+        total_bids_all = 0
+        total_spend_all = 0
+        total_settlements_all = 0
+        active_count = 0
+        pending_count = 0
+        rejected_count = 0
+        success_rates = []
+
+        for adv in advertisers:
+            adv_id = adv["advertiser_id"]
+            stats = advertiser_stats.get(adv_id, {})
+
+            # 상태 카운트
+            if adv["review_status"] == "approved":
+                active_count += 1
+            elif adv["review_status"] == "pending":
+                pending_count += 1
+            elif adv["review_status"] == "rejected":
+                rejected_count += 1
+
+            # 전체 집계
+            total_bids_all += stats.get("total_bids", 0)
+            total_spend_all += stats.get("total_spend", 0)
+            total_settlements_all += stats.get("total_settlements", 0)
+
+            if stats.get("total_settlements", 0) > 0:
+                success_rates.append(stats.get("success_rate", 0))
+
+            result_advertisers.append(
+                {
+                    "advertiser_id": adv_id,
+                    "company_name": adv["company_name"],
+                    "email": adv["email"],
+                    "website_url": adv["website_url"],
+                    "review_status": adv["review_status"],
+                    "daily_budget": adv["daily_budget"],
+                    "is_enabled": adv["is_enabled"],
+                    "created_at": (
+                        adv["created_at"].isoformat() if adv["created_at"] else None
+                    ),
+                    **stats,
+                }
+            )
+
+        # 4. 요약 통계
+        summary = {
+            "total_advertisers": len(advertisers),
+            "active_advertisers": active_count,
+            "pending_advertisers": pending_count,
+            "rejected_advertisers": rejected_count,
+            "total_bids": total_bids_all,
+            "total_spend": total_spend_all,
+            "total_settlements": total_settlements_all,
+            "avg_success_rate": (
+                round(sum(success_rates) / len(success_rates), 1)
+                if success_rates
+                else 0
+            ),
+            "avg_bid_price": (
+                round(total_spend_all / total_bids_all, 0) if total_bids_all > 0 else 0
+            ),
+        }
+
+        return {
+            "success": True,
+            "summary": summary,
+            "advertisers": result_advertisers,
+            "timeRange": timeRange,
+        }
+
+    except Exception as e:
+        logger.exception("get_admin_analytics error: %r", e)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get analytics: {str(e)}"
         )
 
 

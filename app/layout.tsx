@@ -1,12 +1,9 @@
 // 전역 레이아웃
 
 import type { Metadata } from 'next'
-import { Inter } from 'next/font/google'
 import ReturnTracker from './components/ReturnTracker'
 import './globals.css'
 import { Providers } from './providers'
-
-const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
   title: 'Intendex – Real-time Intent Exchange',
@@ -20,7 +17,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} bg-slate-900 text-slate-100 min-h-screen`}>
+      <body className="bg-slate-900 text-slate-100 min-h-screen">
         <Providers>
           <ReturnTracker />
           {children}

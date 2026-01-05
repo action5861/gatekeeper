@@ -16,6 +16,7 @@ interface AutoBidSettings {
     maxBidPerKeyword: number
     minQualityScore: number
     excludedKeywords: string[]
+    targetSlaTier?: string
 }
 
 interface Keyword {
@@ -91,7 +92,8 @@ export default function AutoBiddingPage() {
                     dailyBudget: autoBidSettings.daily_budget || 10000,
                     maxBidPerKeyword: autoBidSettings.max_bid_per_keyword || 3000,
                     minQualityScore: autoBidSettings.min_quality_score || 50,
-                    excludedKeywords: autoBidSettings.excluded_keywords || []
+                    excludedKeywords: autoBidSettings.excluded_keywords || [],
+                    targetSlaTier: autoBidSettings.target_sla_tier || 'standard'
                 })
                 setKeywords(settingsData.data.keywords || [])
 
@@ -160,7 +162,7 @@ export default function AutoBiddingPage() {
         }
     }
 
-    const handleBudgetChange = async (dailyBudget: number, maxBidPerKeyword: number): Promise<boolean> => {
+    const handleBudgetChange = async (dailyBudget: number, maxBidPerKeyword: number, targetSlaTier: string): Promise<boolean> => {
         try {
             const token = localStorage.getItem('token')
             if (!token) return false
@@ -176,6 +178,7 @@ export default function AutoBiddingPage() {
                     dailyBudget,
                     maxBidPerKeyword,
                     minQualityScore: settings.minQualityScore,
+                    targetSlaTier,
                     keywords: keywords,
                     excludedKeywords: settings.excludedKeywords
                 }),
@@ -185,7 +188,8 @@ export default function AutoBiddingPage() {
                 setSettings(prev => ({
                     ...prev,
                     dailyBudget,
-                    maxBidPerKeyword
+                    maxBidPerKeyword,
+                    targetSlaTier
                 }))
                 return true
             } else {
@@ -231,10 +235,13 @@ export default function AutoBiddingPage() {
         }
     }
 
-    const handleExcludedKeywordsChange = async (excludedKeywords: string[]) => {
+    const handleExcludedKeywordsChange = async (excludedKeywords: string[], currentKeywords?: Keyword[]) => {
         try {
             const token = localStorage.getItem('token')
             if (!token) return
+
+            // currentKeywords가 전달되면 사용, 아니면 현재 상태 사용
+            const keywordsToSave = currentKeywords || keywords
 
             const response = await fetch('/api/advertiser/auto-bidding', {
                 method: 'PUT',
@@ -247,7 +254,7 @@ export default function AutoBiddingPage() {
                     dailyBudget: settings.dailyBudget,
                     maxBidPerKeyword: settings.maxBidPerKeyword,
                     minQualityScore: settings.minQualityScore,
-                    keywords: keywords,
+                    keywords: keywordsToSave,
                     excludedKeywords
                 }),
             })

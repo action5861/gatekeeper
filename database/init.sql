@@ -270,8 +270,9 @@ CREATE INDEX IF NOT EXISTS idx_auto_bid_settings_enabled ON auto_bid_settings(is
 
 -- 1. GIN 인덱스 (Trigram 기반 유사도 검색)
 -- LIKE '%keyword%' 패턴 매칭 성능 향상 (10~100배)
+-- 쿼리에서 사용하는 표현식과 일치하도록 lower(replace(...)) 사용
 CREATE INDEX IF NOT EXISTS idx_adv_kw_trgm
-ON advertiser_keywords USING gin (lower(keyword) gin_trgm_ops);
+ON advertiser_keywords USING gin ((lower(replace(keyword, ' ', ''))) gin_trgm_ops);
 
 -- 2. 표현식 인덱스 (정확 매칭 최적화)
 -- lower(replace(keyword, ' ', '')) 표현식 검색 성능 향상

@@ -58,10 +58,10 @@ export default function ReturnTracker() {
                         showSuccessNotification('🎉 전액 정산 완료! 광고주 사이트 체류 시간 충족');
                     } else if (result.decision === 'PARTIAL') {
                         const rewardRatio = result.dwell_time ? 
-                            `${Math.round((0.25 + 0.75 * (result.dwell_time - 3) / (20 - 3)) * 100)}%` : '';
+                            `${Math.round((0.25 + 0.75 * (result.dwell_time - 5) / (20 - 5)) * 100)}%` : '';
                         showInfoNotification(`⚠️ 부분 정산 완료 (${rewardRatio}). 20초 이상 체류하면 전액 정산됩니다.`);
                     } else if (result.decision === 'FAILED') {
-                        showInfoNotification('❌ 체류 시간이 너무 짧습니다. 3초 이상 체류해야 보상을 받을 수 있습니다.');
+                        showInfoNotification('❌ 체류 시간이 너무 짧습니다. 5초 이상 체류해야 보상을 받을 수 있습니다.');
                     }
 
                     // 대시보드 갱신 이벤트

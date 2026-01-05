@@ -18,6 +18,13 @@ import html
 
 app = FastAPI(title="Settlement Service", version="1.0.0")
 
+# SLA Tier Rules Configuration
+SLA_TIER_RULES = {
+    "standard": {"partial_min": 10.0, "pass_min": 20.0},
+    "deep": {"partial_min": 30.0, "pass_min": 60.0},
+    "booster": {"partial_min": 60.0, "pass_min": 90.0},
+}
+
 
 # 🚀 시작 이벤트
 @app.on_event("startup")
@@ -48,6 +55,17 @@ async def startup():
         await database.execute(
             """
             ALTER TABLE settlements ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+            """
+        )
+        await database.execute(
+            """
+            ALTER TABLE transactions ADD COLUMN IF NOT EXISTS target_sla_tier TEXT DEFAULT 'standard';
+            """
+        )
+        # TODO: Verify column name 'balance' - add advertiser balance column if it doesn't exist
+        await database.execute(
+            """
+            ALTER TABLE advertisers ADD COLUMN IF NOT EXISTS balance DECIMAL(10,2) DEFAULT 0.00;
             """
         )
         # Ensure withdrawal_requests table exists (create if not exists via migration)
@@ -118,7 +136,7 @@ class Transaction(BaseModel):
     query: str = Field(..., max_length=500)
     buyerName: str = Field(..., max_length=100)
     primaryReward: int = Field(..., ge=0, le=1000000)
-    secondaryReward: Optional[int] = None
+    secondaryReward: Optional[float] = None  # 소수점 보존을 위해 float로 변경
     settlementDecision: Optional[str] = None
     status: str = Field(..., max_length=50)
     timestamp: str = Field(..., max_length=50)
@@ -388,19 +406,19 @@ async def process_reward(
 
 
 @app.get("/transactions", response_model=TransactionsResponse)
-async def get_transactions():
-    """거래 내역을 조회합니다."""
+async def get_transactions(user_id: int = Depends(get_user_id_from_token)):
+    """거래 내역을 조회합니다. (로그인 사용자만)"""
     try:
-        # PostgreSQL에서 거래 내역 조회
+        # PostgreSQL에서 거래 내역 조회 (user_id 필터 추가, 소수점 보존)
         transactions_data = await database.fetch_all(
             """
             SELECT t.id,
                    t.query_text AS query,
                    t.buyer_name AS "buyerName",
                    t.primary_reward AS "primaryReward",
-                   s.payable_amount AS "secondaryReward",
-                   s.verification_decision AS "settlementDecision",
-                   COALESCE(s.verification_decision, t.status) AS status,
+                   COALESCE(t.secondary_reward, s.payable_amount) AS "secondaryReward",
+                   COALESCE(t.settlement_decision, s.verification_decision) AS "settlementDecision",
+                   COALESCE(t.settlement_decision, s.verification_decision, t.status) AS status,
                    t.created_at AS timestamp
             FROM transactions t
             LEFT JOIN LATERAL (
@@ -410,11 +428,13 @@ async def get_transactions():
               ORDER BY created_at DESC
               LIMIT 1
             ) s ON TRUE
+            WHERE t.user_id = :user_id
             ORDER BY t.created_at DESC
-            """
+            """,
+            values={"user_id": user_id},
         )
 
-        # Pydantic 모델로 변환
+        # Pydantic 모델로 변환 (소수점 보존: float 그대로 사용)
         transactions = [
             Transaction(
                 id=row["id"],
@@ -422,7 +442,7 @@ async def get_transactions():
                 buyerName=row["buyerName"],
                 primaryReward=int(row["primaryReward"]),
                 secondaryReward=(
-                    int(row["secondaryReward"])
+                    float(row["secondaryReward"])
                     if row["secondaryReward"] is not None
                     else None
                 ),
@@ -441,7 +461,7 @@ async def get_transactions():
             for row in transactions_data
         ]
 
-        print(f"GET transactions called, count: {len(transactions)}")
+        print(f"GET transactions called for user {user_id}, count: {len(transactions)}")
         return TransactionsResponse(
             transactions=transactions,
             total=len(transactions),
@@ -536,7 +556,9 @@ class SettlementRequest(BaseModel):
 
 # Withdrawal/Payout Models
 class WithdrawalRequest(BaseModel):
-    request_amount: int = Field(..., ge=10000, description="Minimum withdrawal: 10,000 Points")
+    request_amount: int = Field(
+        ..., ge=10000, description="Minimum withdrawal: 10,000 Points"
+    )
     bank_name: str = Field(..., min_length=1, max_length=100)
     account_number: str = Field(..., min_length=1, max_length=100)
     account_holder: str = Field(..., min_length=1, max_length=100)
@@ -586,38 +608,101 @@ class WithdrawalHistoryResponse(BaseModel):
 @app.post("/settle-trade")
 async def settle_trade_api(request: SettlementRequest):
     """
-    SLA 검증 결과를 받아 최종 정산을 처리합니다.
-    - 판정 결과에 따라 지급액 계산
-    - 사용자 잔고 업데이트 (이곳에서만!)
-    - 거래 상태 변경
-    - settlements 테이블에 기록
+    Zero Risk Guarantee Settlement System
+    - Tier-based SLA verification (server-side decision)
+    - User payout (difference-based update)
+    - Advertiser refund (for PARTIAL/FAILED SLA)
+    - Budget restoration
+    - All operations in single atomic transaction
     """
     try:
         print(
-            f"💰 Settlement processing for trade_id: {request.trade_id}, decision: {request.verification_decision}"
+            f"💰 Settlement processing for trade_id: {request.trade_id}, client_decision: {request.verification_decision}"
         )
 
         async with database.transaction():
-            # 1. 원거래 정보(user_id, 원래 보상액) 조회
-            # 이미 처리된 거래도 재처리 가능하도록 수정 (모든 상태 포함)
-            # bid_id와 id 모두 확인
+            # 1. Retrieve transaction with tier information
             trade = await database.fetch_one(
-                """SELECT user_id, primary_reward, bid_id, status as current_status
+                """SELECT user_id, primary_reward, bid_id, status as current_status, target_sla_tier
                    FROM transactions 
                    WHERE (bid_id = :trade_id OR id = :trade_id)""",
                 values={"trade_id": request.trade_id},
             )
 
             if not trade:
-                print(
-                    f"⚠️ Trade not found or already finally settled: {request.trade_id}"
-                )
+                print(f"⚠️ Trade not found: {request.trade_id}")
                 return {
                     "success": False,
-                    "message": "Trade not found or already finally settled",
+                    "message": "Trade not found",
                 }
 
-            # 이전 settlements 확인 (재처리 시 이전 지급액 확인용)
+            # 2. Determine SLA tier (fallback to 'standard')
+            tier_name = (
+                trade["target_sla_tier"]
+                if "target_sla_tier" in trade and trade["target_sla_tier"]
+                else "standard"
+            )
+            if tier_name not in SLA_TIER_RULES:
+                print(f"⚠️ Invalid tier '{tier_name}', using 'standard'")
+                tier_name = "standard"
+
+            tier_rules = SLA_TIER_RULES[tier_name]
+            partial_min = tier_rules["partial_min"]
+            pass_min = tier_rules["pass_min"]
+            print(
+                f"📊 SLA Tier: {tier_name} (partial_min={partial_min}s, pass_min={pass_min}s)"
+            )
+
+            # 3. Extract actual dwell time (priority: dwell_time > metrics)
+            actual_dwell = 0.0
+            if request.dwell_time is not None and request.dwell_time > 0:
+                actual_dwell = float(request.dwell_time)
+                print(f"📊 Using dwell_time from request: {actual_dwell}s")
+            elif request.metrics:
+                dwell_candidates = [
+                    request.metrics.get("t_dwell"),
+                    request.metrics.get("t_dwell_on_ad_site"),
+                    request.metrics.get("dwell_time"),
+                ]
+                for candidate in dwell_candidates:
+                    if candidate is not None and float(candidate) > 0:
+                        actual_dwell = float(candidate)
+                        print(f"📊 Using dwell_time from metrics: {actual_dwell}s")
+                        break
+
+            if actual_dwell <= 0:
+                print(f"⚠️ No valid dwell time found, using 0s")
+                actual_dwell = 0.0
+
+            # 4. Server-side decision calculation (IGNORE client verification_decision)
+            original_bid_price = float(trade["primary_reward"])
+
+            if actual_dwell < partial_min:
+                # FAILED: actual_dwell < partial_min
+                final_decision = "FAILED"
+                payout_ratio = 0.0
+                payable_amount = 0.0
+                print(f"❌ FAILED: {actual_dwell:.2f}s < {partial_min}s (ratio=0.0)")
+            elif actual_dwell >= pass_min:
+                # PASSED: actual_dwell >= pass_min
+                final_decision = "PASSED"
+                payout_ratio = 1.0
+                payable_amount = original_bid_price
+                print(f"✅ PASSED: {actual_dwell:.2f}s >= {pass_min}s (ratio=1.0)")
+            else:
+                # PARTIAL: partial_min <= actual_dwell < pass_min
+                final_decision = "PARTIAL"
+                # Linear interpolation: ratio = 0.5 + 0.5 * ((actual_dwell - partial_min) / (pass_min - partial_min))
+                payout_ratio = 0.5 + 0.5 * (
+                    (actual_dwell - partial_min) / (pass_min - partial_min)
+                )
+                payout_ratio = max(0.0, min(1.0, payout_ratio))  # Clamp to [0.0, 1.0]
+                payable_amount = original_bid_price * payout_ratio
+                print(
+                    f"📈 PARTIAL: {actual_dwell:.2f}s -> ratio={payout_ratio:.2%}, payable={payable_amount:.2f}원"
+                )
+
+            # 5. Check previous settlement (for difference-based user payout)
             previous_settlement = await database.fetch_one(
                 """SELECT verification_decision, payable_amount 
                    FROM settlements 
@@ -633,77 +718,7 @@ async def settle_trade_api(request: SettlementRequest):
             )
             print(f"📊 Previous settlement: {previous_amount}원")
 
-            # 2. 판정 결과에 따라 최종 지급액 계산
-            payable_amount = 0.0
-
-            if request.verification_decision == "PASSED":
-                # 전액 지급
-                payable_amount = float(trade["primary_reward"])
-                print(f"✅ PASSED - Full payment: {payable_amount}원")
-
-            elif request.verification_decision == "PARTIAL":
-                # 완벽한 선형 보상 시스템: 3초에서 25%, 20초에서 100%로 선형 보간
-                actual_dwell = 0.0
-
-                # 체류시간 추출 (우선순위: dwell_time > metrics)
-                if request.dwell_time is not None and request.dwell_time > 0:
-                    actual_dwell = float(request.dwell_time)
-                    print(f"📊 Using dwell_time from request: {actual_dwell}s")
-                elif request.metrics:
-                    # metrics에서 체류시간 추출 (여러 필드 확인)
-                    dwell_candidates = [
-                        request.metrics.get("t_dwell"),
-                        request.metrics.get("t_dwell_on_ad_site"),
-                        request.metrics.get("dwell_time"),
-                    ]
-                    for candidate in dwell_candidates:
-                        if candidate is not None and float(candidate) > 0:
-                            actual_dwell = float(candidate)
-                            print(f"📊 Using dwell_time from metrics: {actual_dwell}s")
-                            break
-
-                if actual_dwell <= 0:
-                    print(f"⚠️ No valid dwell time found, using 0s")
-                    actual_dwell = 0.0
-
-                # 선형 보상 계산 공식
-                # 3초 = 25%, 20초 = 100%로 선형 보간
-                # ratio = 0.25 + 0.75 * (dwell - 3) / (20 - 3)
-                if actual_dwell <= 3.0:
-                    # 3초 이하: 0% (이미 FAILED로 처리되어야 하지만 안전장치)
-                    ratio = 0.0
-                    print(
-                        f"❌ Dwell time too short: {actual_dwell:.2f}s <= 3s, no reward"
-                    )
-                elif actual_dwell >= 20.0:
-                    # 20초 이상: 100% (이미 PASSED로 처리되어야 하지만 안전장치)
-                    ratio = 1.0
-                    print(
-                        f"✅ Dwell time sufficient: {actual_dwell:.2f}s >= 20s, full reward"
-                    )
-                else:
-                    # 3초 초과 ~ 20초 미만: 선형 보간
-                    # 공식: 0.25 + 0.75 * (dwell - 3) / (20 - 3)
-                    ratio = 0.25 + 0.75 * (actual_dwell - 3.0) / (20.0 - 3.0)
-                    ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
-                    print(f"📈 Linear calculation: {actual_dwell:.2f}s -> {ratio:.2%}")
-
-                # 최종 보상금액 계산
-                payable_amount = float(trade["primary_reward"]) * ratio
-
-                print(
-                    f"💰 PARTIAL SETTLEMENT:\n"
-                    f"   - 체류시간: {actual_dwell:.2f}초\n"
-                    f"   - 보상비율: {ratio:.2%}\n"
-                    f"   - 원래보상: {trade['primary_reward']}원\n"
-                    f"   - 최종지급: {payable_amount:.2f}원"
-                )
-
-            else:  # FAILED
-                payable_amount = 0.0
-                print(f"❌ FAILED - No payment")
-
-            # 3. 사용자 잔고 업데이트 및 거래 상태 변경
+            # 6. User payout (difference-based update)
             amount_difference = payable_amount - previous_amount
             final_status = "SETTLED" if payable_amount > 0 else "FAILED"
 
@@ -717,14 +732,156 @@ async def settle_trade_api(request: SettlementRequest):
                 )
                 adj = "+" if amount_difference > 0 else ""
                 print(
-                    f"✅ Applied balance diff {adj}{amount_difference}원 for user_id {trade['user_id']} (new payable: {payable_amount}원, prev: {previous_amount}원)"
+                    f"✅ User payout: {adj}{amount_difference}원 for user_id {trade['user_id']} (new: {payable_amount}원, prev: {previous_amount}원)"
                 )
             else:
                 print(
-                    f"ℹ️ No balance change: {payable_amount}원 (same as previous {previous_amount}원)"
+                    f"ℹ️ No user balance change: {payable_amount}원 (same as previous)"
                 )
 
-            # 거래 상태 및 정산 결과 업데이트
+            # 7. Advertiser refund (Zero Risk Guarantee) - 차액 기반 처리
+            # bid_id 확인: trade.bid_id가 있으면 사용, 없으면 trade_id 자체가 bid_id일 수 있음
+            bid_id = (
+                trade["bid_id"]
+                if "bid_id" in trade and trade["bid_id"]
+                else request.trade_id
+            )
+            if bid_id:
+                bid_info = await database.fetch_one(
+                    """SELECT advertiser_id, price FROM bids WHERE id = :bid_id""",
+                    values={"bid_id": bid_id},
+                )
+
+                if (
+                    bid_info
+                    and "advertiser_id" in bid_info
+                    and bid_info["advertiser_id"]
+                ):
+                    advertiser_id = bid_info["advertiser_id"]
+                    bid_price = float(bid_info["price"]) if "price" in bid_info else 0.0
+
+                    # Calculate current refund amount based on SLA result
+                    current_refund = 0.0
+                    if final_decision == "PASSED":
+                        # Full payment: no refund
+                        current_refund = 0.0
+                    elif final_decision == "PARTIAL":
+                        # Partial: refund = original_bid_price - payable_amount
+                        current_refund = original_bid_price - payable_amount
+                    else:  # FAILED
+                        # Failed: 100% refund
+                        current_refund = original_bid_price
+
+                    # Calculate previous refund from previous settlement
+                    previous_refund = 0.0
+                    if previous_settlement:
+                        prev_decision = (
+                            previous_settlement["verification_decision"]
+                            if "verification_decision" in previous_settlement
+                            else None
+                        )
+                        prev_payable = float(previous_settlement["payable_amount"])
+                        if prev_decision == "FAILED":
+                            previous_refund = original_bid_price
+                        elif prev_decision == "PARTIAL":
+                            previous_refund = original_bid_price - prev_payable
+                        # PASSED면 previous_refund = 0.0 (이미 0으로 초기화됨)
+
+                    # Calculate refund difference (차액 기반 환불/회수)
+                    refund_difference = current_refund - previous_refund
+                    print(
+                        f"💰 Refund calculation: current={current_refund:.2f}원, previous={previous_refund:.2f}원, difference={refund_difference:.2f}원"
+                    )
+
+                    if refund_difference > 0:
+                        # 환불 증가: 광고주에게 환불 (balance/budget 복구)
+                        await database.execute(
+                            """
+                            UPDATE advertisers 
+                            SET balance = balance + :refund
+                            WHERE id = :advertiser_id
+                            """,
+                            values={
+                                "refund": refund_difference,
+                                "advertiser_id": advertiser_id,
+                            },
+                        )
+                        await database.execute(
+                            """
+                            UPDATE auto_bid_settings 
+                            SET daily_budget = daily_budget + :refund
+                            WHERE advertiser_id = :advertiser_id
+                            """,
+                            values={
+                                "refund": refund_difference,
+                                "advertiser_id": advertiser_id,
+                            },
+                        )
+                        print(
+                            f"💰 Advertiser Refund: +{refund_difference:.2f}원 (total refund={current_refund:.2f}원) - Balance & Budget restored"
+                        )
+                    elif refund_difference < 0:
+                        # 환불 감소: 이전 환불 회수 (balance/budget 차감)
+                        await database.execute(
+                            """
+                            UPDATE advertisers 
+                            SET balance = GREATEST(balance - :refund_recovery, 0)
+                            WHERE id = :advertiser_id
+                            """,
+                            values={
+                                "refund_recovery": abs(refund_difference),
+                                "advertiser_id": advertiser_id,
+                            },
+                        )
+                        await database.execute(
+                            """
+                            UPDATE auto_bid_settings 
+                            SET daily_budget = GREATEST(daily_budget - :refund_recovery, 0)
+                            WHERE advertiser_id = :advertiser_id
+                            """,
+                            values={
+                                "refund_recovery": abs(refund_difference),
+                                "advertiser_id": advertiser_id,
+                            },
+                        )
+                        print(
+                            f"💰 Advertiser Refund Recovery: -{abs(refund_difference):.2f}원 (previous={previous_refund:.2f}원, current={current_refund:.2f}원) - Balance & Budget adjusted"
+                        )
+                    else:
+                        print(
+                            f"💰 Advertiser Refund: No change (refund={current_refund:.2f}원, same as previous)"
+                        )
+
+                    refund_amount = current_refund  # 최종 환불 금액 (로깅용)
+
+                    # 🔥 SSOT 통일: bids 테이블에 정산 결과 기록
+                    await database.execute(
+                        """
+                        UPDATE bids
+                           SET settlement_decision = :decision,
+                               settled_amount      = :amount,
+                               settled_at          = CURRENT_TIMESTAMP
+                         WHERE id = :bid_id
+                        """,
+                        values={
+                            "decision": final_decision,
+                            "amount": payable_amount,
+                            "bid_id": bid_id,
+                        },
+                    )
+                    print(
+                        f"✅ Updated bid: bid_id={bid_id}, decision={final_decision}, settled_amount={payable_amount:.2f}원"
+                    )
+                else:
+                    print(
+                        f"⚠️ Bid not found or no advertiser_id for bid_id={bid_id}, skipping refund"
+                    )
+                    refund_amount = 0.0
+            else:
+                print(f"⚠️ No bid_id in transaction, skipping advertiser refund")
+                refund_amount = 0.0
+
+            # 8. Update transaction status and settlement decision
             await database.execute(
                 """UPDATE transactions
                        SET status = :status,
@@ -734,39 +891,37 @@ async def settle_trade_api(request: SettlementRequest):
                 values={
                     "status": final_status,
                     "secondary_reward": payable_amount,
-                    "decision": request.verification_decision,
+                    "decision": final_decision,
                     "trade_id": request.trade_id,
                 },
             )
-            print(f"✅ Updated transaction status/settlement: {final_status}")
+            print(
+                f"✅ Updated transaction: status={final_status}, decision={final_decision}"
+            )
 
-            # 4. settlements 테이블에 최종 결과 기록 (재처리 시 새 기록 추가)
+            # 9. Insert settlement record
             await database.execute(
                 """INSERT INTO settlements (trade_id, verification_decision, payable_amount, dwell_time)
                    VALUES (:trade_id, :decision, :amount, :dwell_time)""",
                 values={
                     "trade_id": request.trade_id,
-                    "decision": request.verification_decision,
+                    "decision": final_decision,
                     "amount": payable_amount,
-                    "dwell_time": request.dwell_time,
+                    "dwell_time": actual_dwell,
                 },
             )
-            if previous_amount > 0:
-                print(
-                    f"✅ Settlement updated: trade_id={request.trade_id}, new amount={payable_amount}원 (previous: {previous_amount}원, difference: {amount_difference}원)"
-                )
-            else:
-                print(
-                    f"✅ Settlement recorded: trade_id={request.trade_id}, amount={payable_amount}원"
-                )
+            print(
+                f"✅ Settlement recorded: trade_id={request.trade_id}, decision={final_decision}, amount={payable_amount:.2f}원, refund={refund_amount:.2f}원"
+            )
 
         return {
             "success": True,
             "trade_id": request.trade_id,
-            "verification_decision": request.verification_decision,
+            "verification_decision": final_decision,
             "payable_amount": payable_amount,
             "final_status": final_status,
-            "message": f"정산 완료: {payable_amount}원",
+            "refund_amount": refund_amount,
+            "message": f"정산 완료: {payable_amount}원 (환불: {refund_amount}원)",
         }
 
     except Exception as e:
@@ -806,16 +961,16 @@ async def request_withdrawal(
             )
 
             if not user:
-                raise HTTPException(
-                    status_code=404, detail="User not found"
-                )
+                raise HTTPException(status_code=404, detail="User not found")
 
-            current_balance = float(user["total_earnings"]) if user["total_earnings"] else 0.0
+            current_balance = (
+                float(user["total_earnings"]) if user["total_earnings"] else 0.0
+            )
 
             if current_balance < request.request_amount:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Insufficient balance. Current balance: {int(current_balance)} Points, Requested: {request.request_amount} Points"
+                    detail=f"Insufficient balance. Current balance: {int(current_balance)} Points, Requested: {request.request_amount} Points",
                 )
 
             # 2. Deduct balance from users.total_earnings
@@ -826,10 +981,7 @@ async def request_withdrawal(
                 SET total_earnings = GREATEST(:new_balance, 0)
                 WHERE id = :user_id
                 """,
-                values={
-                    "new_balance": new_balance,
-                    "user_id": user_id
-                },
+                values={"new_balance": new_balance, "user_id": user_id},
             )
             print(f"✅ Balance updated: {current_balance} -> {new_balance} Points")
 
@@ -870,10 +1022,10 @@ async def request_withdrawal(
     except Exception as e:
         print(f"❌ Withdrawal error for user {user_id}: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(
-            status_code=500,
-            detail=f"출금 요청 처리 중 오류가 발생했습니다: {str(e)}"
+            status_code=500, detail=f"출금 요청 처리 중 오류가 발생했습니다: {str(e)}"
         )
 
 
@@ -937,10 +1089,294 @@ async def get_withdrawal_history(
     except Exception as e:
         print(f"❌ Error fetching withdrawal history for user {user_id}: {e}")
         import traceback
+
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, detail=f"출금 내역 조회 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+# ============================================
+# 플랫폼 정산 통계 API (관리자용)
+# ============================================
+
+
+class PlatformSettlementSummary(BaseModel):
+    """플랫폼 정산 요약"""
+
+    total_count: int
+    total_amount: int
+    advertiser_count: int
+    advertiser_amount: int
+    platform_count: int
+    platform_amount: int
+    platform_ratio: float  # 플랫폼 비율 (매칭 실패율)
+
+
+class DailySettlement(BaseModel):
+    """일별 정산 데이터"""
+
+    date: str
+    platform_count: int
+    platform_amount: int
+    advertiser_count: int
+    advertiser_amount: int
+
+
+class UserPlatformSettlement(BaseModel):
+    """사용자별 플랫폼 정산 내역"""
+
+    user_id: int
+    username: str
+    email: str
+    platform_count: int
+    platform_amount: int
+    last_settlement_date: Optional[str]
+
+
+class PlatformSettlementStatsResponse(BaseModel):
+    """플랫폼 정산 통계 전체 응답"""
+
+    summary: PlatformSettlementSummary
+    daily_trend: List[DailySettlement]
+    top_users: List[UserPlatformSettlement]
+    period: str
+
+
+@app.get("/admin/platform-settlements/stats")
+async def get_platform_settlement_stats(period: str = "week"):  # day, week, month
+    """
+    플랫폼 정산 통계를 조회합니다.
+    - 총 플랫폼 정산 건수/금액
+    - 일별 추이
+    - 매칭 실패 비율
+    - 사용자별 플랫폼 정산 내역 (상위 20명)
+
+    인덱스를 활용한 효율적인 쿼리로 시스템 부하 최소화
+    """
+    try:
+        # 기간 설정 (날짜를 미리 계산)
+        from datetime import timedelta
+
+        days_map = {"day": 1, "week": 7, "month": 30}
+        days = days_map.get(period, 7)
+        start_date = datetime.now() - timedelta(days=days)
+
+        # 1. 요약 통계 (인덱스 활용)
+        summary_query = """
+            SELECT 
+                COUNT(*) as total_count,
+                COALESCE(SUM(b.price), 0) as total_amount,
+                COUNT(*) FILTER (WHERE b.type = 'ADVERTISER') as advertiser_count,
+                COALESCE(SUM(b.price) FILTER (WHERE b.type = 'ADVERTISER'), 0) as advertiser_amount,
+                COUNT(*) FILTER (WHERE b.type = 'PLATFORM') as platform_count,
+                COALESCE(SUM(b.price) FILTER (WHERE b.type = 'PLATFORM'), 0) as platform_amount
+            FROM bids b
+            WHERE b.created_at >= :start_date
+              AND b.user_id IS NOT NULL
+        """
+        summary_row = await database.fetch_one(
+            summary_query, values={"start_date": start_date}
+        )
+
+        # None 체크
+        if summary_row is None:
+            summary = PlatformSettlementSummary(
+                total_count=0,
+                total_amount=0,
+                advertiser_count=0,
+                advertiser_amount=0,
+                platform_count=0,
+                platform_amount=0,
+                platform_ratio=0.0,
+            )
+        else:
+            total_count = summary_row["total_count"] or 0
+            platform_count = summary_row["platform_count"] or 0
+            platform_ratio = (
+                (platform_count / total_count * 100) if total_count > 0 else 0
+            )
+
+            summary = PlatformSettlementSummary(
+                total_count=total_count,
+                total_amount=int(summary_row["total_amount"] or 0),
+                advertiser_count=summary_row["advertiser_count"] or 0,
+                advertiser_amount=int(summary_row["advertiser_amount"] or 0),
+                platform_count=platform_count,
+                platform_amount=int(summary_row["platform_amount"] or 0),
+                platform_ratio=round(platform_ratio, 2),
+            )
+
+        # 2. 일별 추이 (최근 기간, 인덱스 활용)
+        daily_query = """
+            SELECT 
+                DATE(b.created_at) as date,
+                COUNT(*) FILTER (WHERE b.type = 'PLATFORM') as platform_count,
+                COALESCE(SUM(b.price) FILTER (WHERE b.type = 'PLATFORM'), 0) as platform_amount,
+                COUNT(*) FILTER (WHERE b.type = 'ADVERTISER') as advertiser_count,
+                COALESCE(SUM(b.price) FILTER (WHERE b.type = 'ADVERTISER'), 0) as advertiser_amount
+            FROM bids b
+            WHERE b.created_at >= :start_date
+              AND b.user_id IS NOT NULL
+            GROUP BY DATE(b.created_at)
+            ORDER BY DATE(b.created_at) DESC
+            LIMIT 30
+        """
+        daily_rows = await database.fetch_all(
+            daily_query, values={"start_date": start_date}
+        )
+
+        daily_trend = [
+            DailySettlement(
+                date=str(row["date"]),
+                platform_count=row["platform_count"] or 0,
+                platform_amount=int(row["platform_amount"] or 0),
+                advertiser_count=row["advertiser_count"] or 0,
+                advertiser_amount=int(row["advertiser_amount"] or 0),
+            )
+            for row in daily_rows
+        ]
+
+        # 3. 사용자별 플랫폼 정산 내역 (상위 20명, 페이지네이션 적용)
+        users_query = """
+            SELECT 
+                u.id as user_id,
+                u.username,
+                u.email,
+                COUNT(b.id) as platform_count,
+                COALESCE(SUM(b.price), 0) as platform_amount,
+                MAX(b.created_at) as last_settlement_date
+            FROM bids b
+            INNER JOIN users u ON b.user_id = u.id
+            WHERE b.type = 'PLATFORM'
+              AND b.created_at >= :start_date
+            GROUP BY u.id, u.username, u.email
+            ORDER BY platform_count DESC
+            LIMIT 20
+        """
+        users_rows = await database.fetch_all(
+            users_query, values={"start_date": start_date}
+        )
+
+        top_users = [
+            UserPlatformSettlement(
+                user_id=row["user_id"],
+                username=row["username"],
+                email=row["email"],
+                platform_count=row["platform_count"],
+                platform_amount=int(row["platform_amount"]),
+                last_settlement_date=(
+                    row["last_settlement_date"].isoformat()
+                    if row["last_settlement_date"]
+                    else None
+                ),
+            )
+            for row in users_rows
+        ]
+
+        print(
+            f"📊 Platform settlement stats fetched: {summary.platform_count} platform, {summary.advertiser_count} advertiser"
+        )
+
+        return PlatformSettlementStatsResponse(
+            summary=summary, daily_trend=daily_trend, top_users=top_users, period=period
+        )
+
+    except Exception as e:
+        print(f"❌ Platform settlement stats error: {e}")
+        import traceback
+
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"출금 내역 조회 중 오류가 발생했습니다: {str(e)}"
+            detail=f"플랫폼 정산 통계 조회 중 오류가 발생했습니다: {str(e)}",
+        )
+
+
+@app.get("/admin/platform-settlements/users")
+async def get_platform_settlement_users(
+    page: int = 1, page_size: int = 20, period: str = "week"
+):
+    """
+    플랫폼 정산을 받은 사용자 목록을 페이지네이션으로 조회합니다.
+    시스템 부하 방지를 위해 페이지당 20건씩 조회합니다.
+    """
+    try:
+        from datetime import timedelta
+
+        days_map = {"day": 1, "week": 7, "month": 30}
+        days = days_map.get(period, 7)
+        start_date = datetime.now() - timedelta(days=days)
+
+        offset = (page - 1) * page_size
+
+        # 총 건수 조회 (캐싱 가능)
+        count_query = """
+            SELECT COUNT(DISTINCT b.user_id) as total
+            FROM bids b
+            WHERE b.type = 'PLATFORM'
+              AND b.created_at >= :start_date
+              AND b.user_id IS NOT NULL
+        """
+        count_row = await database.fetch_one(
+            count_query, values={"start_date": start_date}
+        )
+        total = count_row["total"] if count_row else 0
+
+        # 페이지네이션된 사용자 목록
+        users_query = """
+            SELECT 
+                u.id as user_id,
+                u.username,
+                u.email,
+                COUNT(b.id) as platform_count,
+                COALESCE(SUM(b.price), 0) as platform_amount,
+                MAX(b.created_at) as last_settlement_date
+            FROM bids b
+            INNER JOIN users u ON b.user_id = u.id
+            WHERE b.type = 'PLATFORM'
+              AND b.created_at >= :start_date
+            GROUP BY u.id, u.username, u.email
+            ORDER BY platform_count DESC
+            LIMIT :page_size OFFSET :offset
+        """
+        users_rows = await database.fetch_all(
+            users_query,
+            values={"start_date": start_date, "page_size": page_size, "offset": offset},
+        )
+
+        users = [
+            UserPlatformSettlement(
+                user_id=row["user_id"],
+                username=row["username"],
+                email=row["email"],
+                platform_count=row["platform_count"],
+                platform_amount=int(row["platform_amount"]),
+                last_settlement_date=(
+                    row["last_settlement_date"].isoformat()
+                    if row["last_settlement_date"]
+                    else None
+                ),
+            )
+            for row in users_rows
+        ]
+
+        return {
+            "users": users,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+        }
+
+    except Exception as e:
+        print(f"❌ Platform settlement users error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"사용자별 플랫폼 정산 조회 중 오류가 발생했습니다: {str(e)}",
         )
 
 

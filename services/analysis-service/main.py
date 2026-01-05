@@ -200,6 +200,52 @@ async def evaluate_query(request: EvaluateRequest):
     )
 
 
+# ⭐ 빠른 평가 요청 모델 (user_id 선택적)
+class QuickEvaluateRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=200)
+
+
+# ⭐ 빠른 평가 응답 모델
+class QuickEvaluateResponse(BaseModel):
+    success: bool
+    data: FinalQualityReport
+    message: str
+    stage: str  # "quick" 또는 "final"
+
+
+@app.post("/evaluate-quick", response_model=QuickEvaluateResponse)
+async def evaluate_query_quick(request: QuickEvaluateRequest):
+    """
+    빠른 품질 평가 (Legacy만 사용, ~0.1초)
+    - AI 분석 없이 즉시 결과 반환
+    - 점진적 UI를 위한 1단계 평가
+    """
+    query_text = request.query.strip()
+    
+    # Legacy 분석만 실행 (매우 빠름: ~0.1초)
+    legacy_report = evaluate_data_value_legacy(query_text)
+    
+    # Legacy 결과를 FinalQualityReport 형식으로 변환
+    quick_report = FinalQualityReport(
+        score=legacy_report.score,
+        suggestions=legacy_report.suggestions,
+        keywords=legacy_report.keywords,
+        commercialValue=legacy_report.commercialValue,
+        ai_analysis=None,
+        needsImprovement=False,
+        aiSuggestions=None,
+    )
+    
+    print(f"⚡ 빠른 평가 완료: {query_text[:30]}... → {quick_report.score}점")
+    
+    return QuickEvaluateResponse(
+        success=True,
+        data=quick_report,
+        message="빠른 평가가 완료되었습니다. AI 정밀 분석 중...",
+        stage="quick",
+    )
+
+
 @app.get("/health")
 async def health_check():
     db_status = "connected" if database.is_connected else "disconnected"

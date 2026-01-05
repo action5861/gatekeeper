@@ -77,6 +77,7 @@ export async function PUT(request: NextRequest) {
             dailyBudget,
             maxBidPerKeyword,
             minQualityScore,
+            targetSlaTier,
             keywords,
             excludedKeywords
         } = body
@@ -109,6 +110,7 @@ export async function PUT(request: NextRequest) {
                 daily_budget: dailyBudget,
                 max_bid_per_keyword: maxBidPerKeyword,
                 min_quality_score: minQualityScore,
+                target_sla_tier: targetSlaTier || 'standard',
                 excluded_keywords: excludedKeywords
             }),
         })

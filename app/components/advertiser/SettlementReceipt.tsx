@@ -118,14 +118,19 @@ function mapApiResponseToSettlementReceipt(
     }
 
     // 정산 상태 결정
+    // PARTIAL 판정이면서 settled_at이 있으면 정산 완료로 간주
     let settlementStatus: 'COMPLETED' | 'PENDING' | 'FAILED' = 'PENDING'
     if (apiData.settlement) {
         if (apiData.settlement.decision === 'PASSED') {
             settlementStatus = 'COMPLETED'
+        } else if (apiData.settlement.decision === 'PARTIAL') {
+            // PARTIAL 판정이면서 정산이 완료된 경우 (settled_at이 있으면)
+            settlementStatus = apiData.settlement.settled_at ? 'COMPLETED' : 'PENDING'
         } else if (apiData.settlement.decision === 'FAILED') {
             settlementStatus = 'FAILED'
         } else {
-            settlementStatus = 'PENDING'
+            // decision이 없거나 알 수 없는 경우, settled_at으로 판단
+            settlementStatus = apiData.settlement.settled_at ? 'COMPLETED' : 'PENDING'
         }
     }
 
@@ -149,7 +154,7 @@ function mapApiResponseToSettlementReceipt(
 
     // SLA 기준
     const vAtfThreshold = 0.5
-    const dwellThreshold = 5.0
+    const dwellThreshold = 10.0
     const slaPassed = settlementStatus === 'COMPLETED'
 
     // SLA 등급 계산
@@ -237,6 +242,7 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
     const [receipt, setReceipt] = useState<SettlementReceipt | null>(null)
     const [pdfGenerating, setPdfGenerating] = useState(false)
     const receiptContentRef = useRef<HTMLDivElement>(null)
+    const pdfRef = useRef<HTMLDivElement>(null)
 
     const fetchSettlementReceipt = async () => {
         if (!bidId) {
@@ -258,6 +264,7 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
             }
 
             console.log(`[SettlementReceipt] Fetching receipt for bidId: ${bidId}`)
+            console.log(`[SettlementReceipt] API endpoint: /api/advertiser/settlement-receipt/${bidId}`)
             const response = await fetch(`/api/advertiser/settlement-receipt/${bidId}`, {
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -308,25 +315,28 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
     }, [isOpen, bidId])
 
     const handleDownloadPDF = async () => {
-        if (!receiptContentRef.current || !receipt) {
-            console.error('Receipt content or data not available')
-            return
-        }
+        if (!receipt) return
+
+        // 우선순위: PDF 전용 ref -> 없으면 화면용 ref
+        const target = pdfRef.current || receiptContentRef.current
+        if (!target) return
 
         setPdfGenerating(true)
 
         try {
-            // Wait a brief moment to ensure all styles are rendered
+            // 렌더링 대기
             await new Promise(resolve => setTimeout(resolve, 100))
 
-            // Capture the receipt content as canvas with high quality
-            const canvas = await html2canvas(receiptContentRef.current, {
-                scale: 2, // High quality (2x resolution)
+            const canvas = await html2canvas(target, {
+                scale: 2, // 고해상도
                 useCORS: true,
-                backgroundColor: '#0f172a', // slate-900 background color
+                backgroundColor: '#0f172a', // Hex 코드 명시
                 logging: false,
-                windowWidth: receiptContentRef.current.scrollWidth,
-                windowHeight: receiptContentRef.current.scrollHeight,
+                // 중요: scrollWidth를 사용하여 전체 내용을 캡처
+                windowWidth: target.scrollWidth,
+                windowHeight: target.scrollHeight,
+                x: 0,
+                y: 0,
             })
 
             // Calculate PDF dimensions (A4 size in mm)
@@ -460,7 +470,7 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
                 </div>
 
                 {/* Content */}
-                <div ref={receiptContentRef} className="p-6 space-y-6 bg-slate-900">
+                <div ref={receiptContentRef} data-receipt-content className="p-6 space-y-6 bg-slate-900">
                     {loading && (
                         <div className="flex items-center justify-center py-12">
                             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"></div>
@@ -561,13 +571,13 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
                                         <div className="flex items-center space-x-4">
                                             <div className="flex-1">
                                                 <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                                                    <span>Target: 5s</span>
+                                                    <span>Target: 20s</span>
                                                     <span>Actual: {receipt.dwellTimeSec.toFixed(1)}s</span>
                                                 </div>
                                                 <div className="w-full bg-slate-700 rounded-full h-2">
                                                     <div
                                                         className="bg-blue-500 h-2 rounded-full transition-all"
-                                                        style={{ width: `${Math.min((receipt.dwellTimeSec / 5) * 100, 100)}%` }}
+                                                        style={{ width: `${Math.min((receipt.dwellTimeSec / 10) * 100, 100)}%` }}
                                                     />
                                                 </div>
                                             </div>
@@ -651,6 +661,143 @@ export default function SettlementReceipt({ bidId, isOpen, onClose }: Settlement
                     )}
                 </div>
             </div>
+
+            {/* 👇👇👇 PDF 전용 Hidden DOM 👇👇👇 */}
+            {/* display: none 대신 화면 밖으로 보냄 */}
+            {receipt && (
+                <div style={{ position: 'absolute', left: '-9999px', top: 0 }}>
+                    <div
+                        ref={pdfRef}
+                        style={{
+                            // A4 비율 고려한 고정 사이즈 (매우 중요)
+                            width: '794px', // A4 width at 96 DPI roughly
+                            padding: '40px',
+                            backgroundColor: '#0f172a', // ✅ Hex 코드 사용 (oklab 오류 해결 핵심)
+                            color: '#e5e7eb', // ✅ Hex 코드
+                            fontFamily: 'system-ui, -apple-system, sans-serif',
+                            boxSizing: 'border-box',
+                            border: '1px solid #334155'
+                        }}
+                    >
+                        <h1 style={{ fontSize: '24px', fontWeight: 700, marginBottom: '8px', color: '#f1f5f9' }}>
+                            Intendex Purchase Receipt & Traffic Audit
+                        </h1>
+                        <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '24px' }}>
+                            Intendex Real-time Intent Exchange Platform
+                        </p>
+
+                        <hr style={{ borderColor: '#334155', marginBottom: '24px' }} />
+
+                        {/* Trade Summary */}
+                        <div style={{ marginBottom: '20px', padding: '16px', backgroundColor: '#1e293b', borderRadius: '8px' }}>
+                            <h2 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: '#e2e8f0', textTransform: 'uppercase' }}>Trade Summary</h2>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <div style={{ lineHeight: '1.6' }}>
+                                    <div>Trade ID: <span style={{ fontFamily: 'monospace' }}>{receipt.tradeId}</span></div>
+                                    <div>Transaction Time: {formatKSTDate(receipt.tradeAt)}</div>
+                                    <div>Settlement Time: {formatKSTDate(receipt.settlementAt)}</div>
+                                </div>
+                                <div style={{ textAlign: 'right', lineHeight: '1.6' }}>
+                                    <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#ffffff' }}>Total Paid: {receipt.finalReward.toLocaleString()} P</div>
+                                    <div style={{ color: '#94a3b8' }}>Bid Price: {receipt.bidAmount.toLocaleString()} P</div>
+                                    <div style={{ color: '#facc15' }}>Grade: {receipt.slaGrade}-Class</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Participants */}
+                        <div style={{ marginBottom: '20px', padding: '16px', border: '1px solid #334155', borderRadius: '8px' }}>
+                            <h2 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: '#e2e8f0' }}>Participants</h2>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>User ID</div>
+                                    <div style={{ fontFamily: 'monospace' }}>{receipt.userId}</div>
+                                </div>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Advertiser ID</div>
+                                    <div style={{ fontFamily: 'monospace' }}>{receipt.advertiserId}</div>
+                                </div>
+                                <div style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Transaction ID</div>
+                                    <div style={{ fontFamily: 'monospace' }}>{receipt.transactionId}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Intent Details */}
+                        <div style={{ marginBottom: '20px', padding: '16px', border: '1px solid #334155', borderRadius: '8px' }}>
+                            <h2 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: '#e2e8f0' }}>Intent Details</h2>
+                            <div style={{ marginBottom: '8px' }}>
+                                <span style={{ color: '#94a3b8' }}>Search Query: </span>
+                                <span style={{ fontWeight: 600 }}>{receipt.searchQuery}</span>
+                            </div>
+                            <div>
+                                <span style={{ color: '#94a3b8' }}>Category: </span>
+                                <span>{receipt.category}</span>
+                            </div>
+                        </div>
+
+                        {/* SLA Metrics */}
+                        <div style={{ marginBottom: '20px', padding: '16px', border: '1px solid #334155', borderRadius: '8px' }}>
+                            <h2 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: '#e2e8f0' }}>SLA Verification Metrics</h2>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Viewability (v_atf)</div>
+                                    <div style={{ fontSize: '16px', fontWeight: 600, color: '#4ade80' }}>{vAtfPercent.toFixed(1)}%</div>
+                                </div>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Dwell Time</div>
+                                    <div style={{ fontSize: '16px', fontWeight: 600, color: '#60a5fa' }}>{receipt.dwellTimeSec.toFixed(1)}s</div>
+                                </div>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Click Validation</div>
+                                    <div style={{ color: receipt.clicked ? '#4ade80' : '#f87171' }}>{receipt.clicked ? 'Verified' : 'Not Detected'}</div>
+                                </div>
+                                <div>
+                                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>Fraud Detection</div>
+                                    <div style={{ color: !receipt.fraudDetected ? '#4ade80' : '#f87171' }}>{!receipt.fraudDetected ? 'Passed' : 'Suspicious'}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Financials */}
+                        <div style={{ marginBottom: '24px' }}>
+                            <h2 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '8px', color: '#e2e8f0' }}>Financial Breakdown</h2>
+                            <div style={{ borderTop: '1px solid #334155', borderBottom: '1px solid #334155', padding: '12px 0' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span>Bid Price</span>
+                                    <span style={{ fontFamily: 'monospace' }}>{receipt.bidAmount.toLocaleString()} P</span>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span>Platform Fee (32%)</span>
+                                    <span style={{ fontFamily: 'monospace' }}>{feeAmount.toLocaleString()} P</span>
+                                </div>
+                                {receipt.betaPromotion && (
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', color: '#4ade80' }}>
+                                        <span>Beta Promotion Discount</span>
+                                        <span style={{ fontFamily: 'monospace' }}>-{feeAmount.toLocaleString()} P</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '12px', fontSize: '16px', fontWeight: 'bold' }}>
+                                <span>Final Charge</span>
+                                <span>{receipt.finalReward.toLocaleString()} P</span>
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div style={{ marginTop: '40px', paddingTop: '20px', borderTop: '1px dashed #334155' }}>
+                            <h2 style={{ fontSize: '10px', fontWeight: 600, marginBottom: '4px', color: '#94a3b8', textTransform: 'uppercase' }}>Transaction Hash</h2>
+                            <div style={{ fontFamily: 'monospace', fontSize: '10px', wordBreak: 'break-all', color: '#64748b', lineHeight: '1.4' }}>
+                                {receipt.tradeHash}
+                            </div>
+                            <p style={{ fontSize: '10px', color: '#475569', marginTop: '12px', fontStyle: 'italic' }}>
+                                This receipt serves as digital proof of intent purchase under the Intendex Electronic Financial Transaction Policy.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

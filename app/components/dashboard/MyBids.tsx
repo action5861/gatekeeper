@@ -97,89 +97,113 @@ export default function MyBids({ recentBids }: MyBidsProps) {
                 </div>
             ) : (
                 <div className="space-y-4">
-                    {recentBids.slice(0, 5).map((bid, index) => (
-                        <div
-                            key={`${bid.id}-${bid.timestamp}-${index}`}
-                            className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 hover:border-slate-500 transition-all duration-200"
-                        >
-                            <div className="flex items-center justify-between mb-3">
-                                <div className="flex items-center space-x-3">
-                                    {getStatusIcon(bid.status)}
-                                    <span className={`text-sm font-medium ${getStatusColor(bid.status)}`}>
-                                        {bid.status.charAt(0).toUpperCase() + bid.status.slice(1)}
-                                    </span>
-                                </div>
-                                <span className="text-xs text-slate-400">
-                                    {new Date(bid.timestamp).toLocaleDateString()}
-                                </span>
-                            </div>
+                    {recentBids.slice(0, 5).map((bid, index) => {
+                        // 🔥 디버그 로그 (개발 모드에서만)
+                        if (process.env.NODE_ENV === 'development') {
+                            console.log('MY_BID_DEBUG', {
+                                id: bid.id,
+                                bidId: bid.bidId,
+                                auctionId: bid.auctionId,
+                                amount: bid.amount,
+                                myBid: bid.myBid,
+                                highestBid: bid.highestBid,
+                                settlement: bid.settlement,
+                            })
+                        }
 
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <p className="text-xs text-slate-400">Auction ID</p>
-                                    <p className="text-sm font-medium text-slate-200">{bid.auctionId}</p>
-                                </div>
-                                <div>
-                                    <p className="text-xs text-slate-400">My Bid</p>
-                                    <p className="text-sm font-bold text-slate-100">{bid.myBid.toLocaleString()}P</p>
-                                </div>
-                                {bid.highestBid && (
-                                    <div>
-                                        <p className="text-xs text-slate-400">Highest Bid</p>
-                                        <p className="text-sm font-medium text-slate-200">{bid.highestBid.toLocaleString()}P</p>
-                                    </div>
-                                )}
-                                <div>
-                                    <p className="text-xs text-slate-400">
-                                        {bid.settlement
-                                            ? '정산 금액'
-                                            : 'Amount'}
-                                    </p>
-                                    <p className="text-sm font-medium text-slate-200">
-                                        {bid.settlement
-                                            ? bid.settlement.settled_amount.toLocaleString()
-                                            : bid.amount.toLocaleString()}P
-                                    </p>
-                                </div>
-                            </div>
+                        // 정산 금액 및 표시 로직
+                        const settledAmount = bid.settlement?.settled_amount
+                        const hasSettlement = settledAmount !== null && settledAmount !== undefined
 
-                            {/* Bid Status Indicator */}
-                            <div className="mt-3 pt-3 border-t border-slate-600">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs text-slate-400">Bid Status</span>
-                                    <div className="flex items-center space-x-2">
-                                        <DollarSign className="w-3 h-3 text-slate-400" />
-                                        <span className="text-xs text-slate-300">
-                                            {bid.status === 'active' && 'Active'}
-                                            {bid.status === 'won' && 'Won'}
-                                            {bid.status === 'lost' && 'Outbid'}
-                                            {bid.status === 'pending' && 'Pending'}
+                        // 정산이 존재하면 settled_amount 사용 (0이어도), 없으면 myBid 사용
+                        const displayLabel = hasSettlement ? '정산 금액' : 'Amount'
+                        const fallbackAmount = bid.myBid ?? bid.amount
+                        const displayAmount = hasSettlement ? Number(settledAmount) : Number(fallbackAmount)
+
+                        // 영수증 조회용 ID (trade_id 우선)
+                        const receiptId = bid.settlement?.trade_id || bid.bidId || bid.id
+
+                        return (
+                            <div
+                                key={`${bid.id}-${bid.timestamp}-${index}`}
+                                className="bg-slate-700/30 rounded-xl p-4 border border-slate-600 hover:border-slate-500 transition-all duration-200"
+                            >
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="flex items-center space-x-3">
+                                        {getStatusIcon(bid.status)}
+                                        <span className={`text-sm font-medium ${getStatusColor(bid.status)}`}>
+                                            {bid.status.charAt(0).toUpperCase() + bid.status.slice(1)}
                                         </span>
                                     </div>
+                                    <span className="text-xs text-slate-400">
+                                        {new Date(bid.timestamp).toLocaleDateString()}
+                                    </span>
                                 </div>
-                            </div>
 
-                            {/* Settlement Receipt Button - won 상태이거나 정산 정보가 있으면 표시 */}
-                            {(() => {
-                                const statusLower = bid.status?.toLowerCase() || '';
-                                const hasSettlement = bid.settlement !== null && bid.settlement !== undefined;
-                                // won 상태이거나 정산 정보가 있으면 버튼 표시
-                                return statusLower === 'won' || hasSettlement;
-                            })() && (
-                                    <div className="mt-3 pt-3 border-t border-slate-600">
-                                        <button
-                                            onClick={() => handleViewReceipt(bid.bidId || bid.id)}
-                                            className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg transition-colors"
-                                        >
-                                            <FileText className="w-4 h-4 text-blue-400" />
-                                            <span className="text-sm font-medium text-blue-400">
-                                                {bid.settlement ? '정산 영수증 보기' : '정산 영수증 조회'}
-                                            </span>
-                                        </button>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <p className="text-xs text-slate-400">Auction ID</p>
+                                        <p className="text-sm font-medium text-slate-200">{bid.auctionId}</p>
                                     </div>
-                                )}
-                        </div>
-                    ))}
+                                    <div>
+                                        <p className="text-xs text-slate-400">My Bid</p>
+                                        <p className="text-sm font-bold text-slate-100">{bid.myBid.toLocaleString()}P</p>
+                                    </div>
+                                    {bid.highestBid && (
+                                        <div>
+                                            <p className="text-xs text-slate-400">Highest Bid</p>
+                                            <p className="text-sm font-medium text-slate-200">{bid.highestBid.toLocaleString()}P</p>
+                                        </div>
+                                    )}
+                                    <div>
+                                        <p className="text-xs text-slate-400">{displayLabel}</p>
+                                        <p className="text-sm font-medium text-slate-200">
+                                            {displayAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}P
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Bid Status Indicator */}
+                                <div className="mt-3 pt-3 border-t border-slate-600">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-slate-400">Bid Status</span>
+                                        <div className="flex items-center space-x-2">
+                                            <DollarSign className="w-3 h-3 text-slate-400" />
+                                            <span className="text-xs text-slate-300">
+                                                {bid.status === 'active' && 'Active'}
+                                                {bid.status === 'won' && 'Won'}
+                                                {bid.status === 'lost' && 'Outbid'}
+                                                {bid.status === 'pending' && 'Pending'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Settlement Receipt Button - won 상태이거나 정산 정보가 있으면 표시 */}
+                                {(() => {
+                                    const statusLower = bid.status?.toLowerCase() || '';
+                                    const hasSettlement = bid.settlement !== null && bid.settlement !== undefined;
+                                    // won 상태이거나 정산 정보가 있으면 버튼 표시
+                                    return statusLower === 'won' || hasSettlement;
+                                })() && (
+                                        <div className="mt-3 pt-3 border-t border-slate-600">
+                                            <button
+                                                onClick={() => {
+                                                    console.log('[MyBids] View receipt clicked, receiptId:', receiptId)
+                                                    handleViewReceipt(receiptId)
+                                                }}
+                                                className="w-full flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 rounded-lg transition-colors"
+                                            >
+                                                <FileText className="w-4 h-4 text-blue-400" />
+                                                <span className="text-sm font-medium text-blue-400">
+                                                    {bid.settlement ? '정산 영수증 보기' : '정산 영수증 조회'}
+                                                </span>
+                                            </button>
+                                        </div>
+                                    )}
+                            </div>
+                        )
+                    })}
                 </div>
             )}
 

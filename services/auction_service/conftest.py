@@ -54,7 +54,8 @@ async def client(mocker):
     # 모든 요청에 'Origin' 헤더를 추가하여 CORS 문제를 해결합니다.
     headers = {"Origin": "http://localhost:3000"}
 
-    transport = ASGITransport(app=app)
+    # ASGITransport는 FastAPI 앱을 받을 수 있지만 타입 체커가 인식하지 못함
+    transport = ASGITransport(app=app)  # type: ignore[arg-type]
     async with AsyncClient(
         transport=transport, base_url="http://test", headers=headers
     ) as ac:

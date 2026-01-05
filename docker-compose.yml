@@ -1,7 +1,7 @@
 services:
-  # 🗄️ PostgreSQL 데이터베이스 추가 (로컬 PostgreSQL 사용)
+  # 🗄️ PostgreSQL 데이터베이스 추가 (pgvector 포함)
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: postgres-db
     environment:
       POSTGRES_DB: search_exchange_db
@@ -54,15 +54,26 @@ services:
       postgres:
         condition: service_healthy
 
-  # 🏪 Auction Service
+  # 🏪 Auction Service (Semantic Matching 지원)
   auction-service:
     build: ./services/auction_service
     container_name: auction-service
     ports:
       - "8002:8002"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
       - REDIRECT_BASE_URL=${REDIRECT_BASE_URL}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL:-models/gemini-flash-latest}
+      # 시맨틱 매칭 설정 (선택적)
+      - SEMANTIC_MATCH_LIMIT=50
+      - SEMANTIC_SIM_THRESHOLD=0.72
+      - SEMANTIC_WEIGHT=3.0
+      - SEMANTIC_ONLY_MIN_SIM=0.75
+      - SEMANTIC_ONLY_THRESHOLD=2.2
+      - LOG_LEVEL=DEBUG
     networks:
       - app-network
     depends_on:
@@ -165,6 +176,8 @@ services:
     container_name: advertiser-service
     ports:
       - "8007:8007"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
       - JWT_SECRET_KEY=digisafe-super-secret-jwt-key-2024-production-ready-32-chars
@@ -173,6 +186,8 @@ services:
       - JWT_AUDIENCE=digisafe-client
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
       - WEBSITE_ANALYSIS_SERVICE_URL=http://website-analysis-service:8009
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-models/text-embedding-004}
     networks:
       - app-network
     depends_on:
@@ -191,7 +206,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_MODEL=models/gemini-flash-latest
+      - GEMINI_MODEL=models/gemini-2.5-pro
     networks:
       - app-network
     depends_on:

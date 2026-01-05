@@ -1,0 +1,50 @@
+SELECT a.id, a.company_name, ak.keyword, ak.match_type 
+FROM advertisers a 
+LEFT JOIN advertiser_keywords ak ON a.id = ak.advertiser_id 
+WHERE a.id = 13;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -18,10 +18,10 @@ def calculate_linear_reward(dwell_time: float, base_reward: float = 200.0) -> di
     if dwell_time >= 20.0:
         decision = "PASSED"
         ratio = 1.0
-    elif dwell_time > 3.0:
+    elif dwell_time > 10.0:
         decision = "PARTIAL"
-        # 선형 보상 계산: 3초(25%) ~ 20초(100%)
-        ratio = 0.25 + 0.75 * (dwell_time - 3.0) / (20.0 - 3.0)
+        # 선형 보상 계산: 10초(50%) ~ 20초(100%)
+        ratio = 0.5 + 0.5 * (dwell_time - 10.0) / (20.0 - 10.0)
         ratio = max(0.0, min(1.0, ratio))  # 0~1로 클램프
     else:
         decision = "FAILED"

@@ -3,11 +3,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 
 // 1. 백엔드 Pydantic 모델과 거의 동일한 Zod 스키마 정의
-// AI 온보딩: websiteUrl만 필수, 나머지는 선택적 (AI가 자동 생성)
+// websiteUrl은 필수, categories는 웹사이트 분석 단계에서는 선택적, 나머지는 선택적
 const BusinessSetupSchema = z.object({
     websiteUrl: z.string().url({ message: "올바른 URL 형식이 아닙니다." }).max(500),
     keywords: z.array(z.string().max(50, { message: "키워드는 50자를 초과할 수 없습니다." })).max(100).optional(),
-    categories: z.array(z.union([z.number(), z.string()])).max(50).optional(),
+    categories: z.array(z.union([z.number(), z.string()])).min(1, { message: "최소 1개 이상의 카테고리를 선택해야 합니다." }).max(50).optional(),
     dailyBudget: z.number().int().min(1000).max(10_000_000).optional(),
     bidRange: z.object({
         min: z.number().int().min(50).max(10_000),
@@ -30,7 +30,7 @@ const BaseSchema = z.object({
 const AdvertiserSchema = BaseSchema.extend({
     userType: z.literal('advertiser'),
     companyName: z.string().min(1, { message: "회사명은 필수입니다." }).max(100),
-    businessSetup: BusinessSetupSchema,
+    businessSetup: BusinessSetupSchema.optional(),
 });
 
 // 일반 사용자용 스키마 (기본 + 사용자 필수 필드)
@@ -60,20 +60,26 @@ export async function POST(req: NextRequest) {
 
         if (clientData.userType === 'advertiser') {
             // 광고주인 경우
-            const numericCategories = clientData.businessSetup.categories?.map(c =>
-                typeof c === 'string' ? parseInt(c, 10) : c
-            );
-
-            backendPayload = {
+            let backendPayloadData: any = {
                 username: emailUsername,
                 email: clientData.email,
                 password: clientData.password,
                 company_name: clientData.companyName,
-                business_setup: {
+            };
+
+            // businessSetup이 있는 경우에만 추가
+            if (clientData.businessSetup) {
+                const numericCategories = clientData.businessSetup.categories?.map(c =>
+                    typeof c === 'string' ? parseInt(c, 10) : c
+                );
+
+                backendPayloadData.business_setup = {
                     ...clientData.businessSetup,
                     ...(numericCategories && { categories: numericCategories }),
-                },
-            };
+                };
+            }
+
+            backendPayload = backendPayloadData;
         } else {
             // 일반 사용자인 경우
             backendPayload = {

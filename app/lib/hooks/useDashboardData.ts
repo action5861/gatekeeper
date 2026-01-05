@@ -8,7 +8,7 @@ export function useDashboardData() {
 
     const [transactions, setTransactions] = useState<TransactionItem[] | null>(null)
     const [summary, setSummary] = useState<null | {
-        avgQualityScore: number; successRate: number; totalEarnings: number; today: { bids: number; bidValue: number; rewards: number }
+        avgQualityScore: number; successRate: number; totalEarnings: number; today: { bids: number; bidValue: number; rewards: number }; hasSignupBonusToday?: boolean
     }>(null)
     const [qualitySeries, setQualitySeries] = useState<null | { date: string; avg: number; count: number }[]>(null)
     const [realtime, setRealtime] = useState<{ recentQueries: number; recentBids: number } | null>(null)
