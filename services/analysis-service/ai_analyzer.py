@@ -1,7 +1,8 @@
 # services/analysis-service/ai_analyzer.py
-import os
+import hashlib
 import json
-from typing import Any, Optional, List, Literal, cast
+import os
+from typing import Any, List, Literal, Optional, cast
 from pydantic import BaseModel, Field
 
 # Gemini SDK (pyright가 이 경로를 더 잘 인식)
@@ -204,8 +205,29 @@ Bad examples:
 """
 
 
+def _make_analysis_cache_key(query: str) -> str:
+    """검색어 기반 캐시 키 생성 (analysis:keyword:{hashed_query})"""
+    normalized = query.strip().lower()
+    h = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"analysis:keyword:{h}"
+
+
 async def analyze_query_with_ai(query: str) -> AiAnalysisReport:
-    """Gemini API 호출 → Pydantic 모델 반환"""
+    """Gemini API 호출 → Pydantic 모델 반환 (Redis 캐싱 적용)"""
+    try:
+        from cache import get_cached_analysis, set_cached_analysis
+
+        cache_key = _make_analysis_cache_key(query)
+        cached_json = await get_cached_analysis(cache_key)
+        if cached_json:
+            print("🚀 Cache Hit!")
+            data = json.loads(cached_json)
+            return AiAnalysisReport(**data)
+    except Exception:
+        pass  # Redis 실패 시 기존 Gemini API 호출로 Fallback
+
+    # Cache Miss → Gemini API 호출 (캐시 없음 또는 Redis 미연결)
+    print("📤 Cache Miss → Gemini API 호출")
     model = _get_model()  # Optional 아님
 
     prompt = MASTER_PROMPT_TEMPLATE.format(query=query)
@@ -252,7 +274,18 @@ async def analyze_query_with_ai(query: str) -> AiAnalysisReport:
         else:
             raise
 
-    return AiAnalysisReport(**data)
+    report = AiAnalysisReport(**data)
+
+    # 캐시에 저장 (실패해도 결과는 반환)
+    try:
+        from cache import set_cached_analysis
+
+        cache_key = _make_analysis_cache_key(query)
+        await set_cached_analysis(cache_key, report.model_dump_json())
+    except Exception:
+        pass
+
+    return report
 
 
 # --- 검색어 개선 제안 생성 (30점 미만 검색어용) ---

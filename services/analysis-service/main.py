@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import database, connect_to_database, disconnect_from_database
+from cache import connect_redis, disconnect_redis
 from ai_analyzer import (
     analyze_query_with_ai,
     generate_improved_queries,
@@ -30,11 +31,13 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup():
     await connect_to_database()
+    await connect_redis()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await disconnect_from_database()
+    await disconnect_redis()
 
 
 app.add_middleware(
@@ -248,11 +251,15 @@ async def evaluate_query_quick(request: QuickEvaluateRequest):
 
 @app.get("/health")
 async def health_check():
+    from cache import get_redis
+
     db_status = "connected" if database.is_connected else "disconnected"
+    redis_status = "connected" if await get_redis() else "disconnected"
     return {
         "status": "healthy",
         "service": "Analysis Service v2.0",
         "database": db_status,
+        "redis": redis_status,
         "ai_model": "models/gemini-flash-latest",
     }
 

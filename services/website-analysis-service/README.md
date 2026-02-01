@@ -2,6 +2,14 @@
 
 AI 기반 웹사이트 분석 마이크로서비스입니다. 광고주의 웹사이트를 분석하여 최적의 키워드와 카테고리를 자동으로 생성합니다.
 
+## 최근 업데이트 (2026-02-01)
+
+- **Redis 캐싱**: URL 기반 AI 분석 결과 캐싱 (Cache First → Lock Later). 동일 URL 재요청 시 즉시 반환.
+- **동시성 제한**: `asyncio.Semaphore(2)`로 동시 브라우저 분석 최대 2개.
+- **대기열 API**: `GET /queue-status` — `available_slots`, `waiting_requests`, `estimated_wait_time` 제공.
+- **타임아웃**: 분석 작업 60초 초과 시 자동 종료 및 Semaphore 반환.
+- **의존성**: `redis[hiredis]`, Docker Compose에 Redis 서비스 및 `REDIS_URL` 추가.
+
 ## 기능
 
 - 🌐 웹사이트 스크래핑 (Playwright)
@@ -87,6 +95,18 @@ docker run -p 8009:8009 \
 }
 ```
 
+### GET /queue-status
+대기열 상태 조회 (프론트엔드 대기 시간 표시용).
+
+**응답:**
+```json
+{
+  "available_slots": 2,
+  "waiting_requests": 0,
+  "estimated_wait_time": 0
+}
+```
+
 ### GET /health
 헬스 체크 엔드포인트입니다.
 
@@ -114,6 +134,7 @@ docker run -p 8009:8009 \
 | 변수명 | 설명 | 예시 |
 |--------|------|------|
 | DATABASE_URL | PostgreSQL 연결 URL | `postgresql://user:pass@host:5432/db` |
+| REDIS_URL | Redis 연결 URL (캐시용) | `redis://redis:6379/0` |
 | GEMINI_API_KEY | Google Gemini API 키 | `AIza...` |
 
 ## 주의사항

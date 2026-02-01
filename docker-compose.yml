@@ -36,6 +36,22 @@ services:
       postgres:
         condition: service_healthy
 
+  # 🔴 Redis (AI 분석 결과 캐싱)
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # 🔍 Analysis Service
   analysis-service:
     build: ./services/analysis-service
@@ -46,12 +62,15 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
+      - REDIS_URL=redis://redis:6379/0
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=models/gemini-flash-latest
     networks:
       - app-network
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # 🏪 Auction Service (Semantic Matching 지원)
@@ -205,12 +224,15 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db
+      - REDIS_URL=redis://redis:6379/0
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=models/gemini-2.5-pro
     networks:
       - app-network
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: on-failure
 
@@ -287,6 +309,8 @@ volumes:
   postgres_data:
     driver: local
   pgadmin_data:
+    driver: local
+  redis_data:
     driver: local
 
 # 🌐 네트워크 정의

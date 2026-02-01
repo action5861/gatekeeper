@@ -23,7 +23,7 @@ import os
 import json
 import logging
 import asyncio
-from typing import Any, List, cast
+from typing import Any, Dict, List, Optional, cast
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
@@ -42,6 +42,14 @@ except Exception:
 
 # Database
 from database import database, connect_to_database, disconnect_from_database
+
+# Redis Cache
+from redis_cache import (
+    connect_redis,
+    disconnect_redis,
+    get_cached_website_analysis,
+    set_cached_website_analysis,
+)
 
 # --- 로깅 설정 ---
 logging.basicConfig(
@@ -62,6 +70,9 @@ model: Any = cast(Any, genai).GenerativeModel(MODEL_NAME)  # type: ignore[attr-d
 
 app = FastAPI()
 
+# --- Concurrency Control: 동시 브라우저 분석 작업 최대 2개 ---
+browser_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
+
 
 # --- Pydantic 모델 ---
 class AnalysisRequest(BaseModel):
@@ -73,6 +84,7 @@ class AnalysisRequest(BaseModel):
 @app.on_event("startup")
 async def startup():
     await connect_to_database()
+    await connect_redis()
     logger.info("✅ Website Analysis Service started successfully")
     logger.info(f"[Gemini] KEY_SET={bool(API_KEY)}, MODEL={MODEL_NAME}")
     logger.info(f"[Gemini] EMBEDDING_MODEL={EMBEDDING_MODEL_NAME}")
@@ -81,6 +93,7 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await disconnect_from_database()
+    await disconnect_redis()
 
 
 # --- 핵심 로직: 웹사이트 스크래핑 ---
@@ -656,9 +669,68 @@ async def save_analysis_results(advertiser_id: int, results: dict):
 
 
 # --- 백그라운드 전체 태스크 ---
+ANALYSIS_TIMEOUT_SECONDS = 60.0
+
+
 async def run_analysis_task(advertiser_id: int, url: str):
     """
     백그라운드에서 실행되는 웹사이트 분석 태스크입니다.
+    Cache First, Lock Later: 캐시 확인 후 Semaphore 획득. 타임아웃 60초.
+    """
+    # --- Step 1 (Lock-Free): Redis 캐시 먼저 조회 ---
+    try:
+        cached_json = await get_cached_website_analysis(url)
+        if cached_json:
+            logger.info(f"🚀 Cache Hit for {url[:80]}...")
+            analysis_results = json.loads(cached_json)
+            await save_analysis_results(advertiser_id, analysis_results)
+            logger.info(f"✨ [{advertiser_id}] 캐시 결과 저장 완료")
+            return
+    except Exception as e:
+        logger.warning("⚠️ 캐시 조회/사용 실패, API 분석으로 진행: %s", e)
+
+    # --- Step 2 (Acquire Lock): 캐시 없으면 Semaphore 획득 ---
+    async with browser_semaphore:
+        waiters = len(getattr(browser_semaphore, "_waiters", []))
+        logger.info(f"🚦 Semaphore acquired. Waiting: {waiters}, URL: {url[:50]}...")
+        try:
+            # --- Step 3: 타임아웃 안전장치 걸고 분석 실행 ---
+            analysis_results = await asyncio.wait_for(
+                _run_analysis_task_inner(advertiser_id, url),
+                timeout=ANALYSIS_TIMEOUT_SECONDS,
+            )
+            if analysis_results:
+                # --- Step 4: 결과를 Redis에 저장 ---
+                await set_cached_website_analysis(url, json.dumps(analysis_results))
+                await save_analysis_results(advertiser_id, analysis_results)
+                logger.info(f"✨ [{advertiser_id}] 전체 분석 프로세스 완료")
+        except asyncio.TimeoutError:
+            logger.error("⏰ Analysis timed out for %s (advertiser_id=%s)", url, advertiser_id)
+            try:
+                await database.execute(
+                    """
+                    UPDATE advertisers SET approval_status = 'pending'
+                    WHERE id = :advertiser_id
+                    """,
+                    {"advertiser_id": advertiser_id},
+                )
+                await database.execute(
+                    """
+                    UPDATE advertiser_reviews
+                    SET website_analysis = '웹사이트 분석 실패: 타임아웃(60초 초과)',
+                        review_status = 'pending'
+                    WHERE advertiser_id = :advertiser_id
+                    """,
+                    {"advertiser_id": advertiser_id},
+                )
+            except Exception as inner_e:
+                logger.error("💥 타임아웃 처리 중 예외: %s", inner_e, exc_info=True)
+
+
+async def _run_analysis_task_inner(advertiser_id: int, url: str) -> Optional[Dict[str, Any]]:
+    """
+    실제 분석 로직 (Semaphore 획득 후 실행).
+    스크래핑 + Gemini 분석만 수행하고 결과를 반환. DB 저장은 호출자가 수행.
     """
     try:
         logger.info(f"🔍 [{advertiser_id}] 웹사이트 분석 시작: {url}")
@@ -693,7 +765,7 @@ async def run_analysis_task(advertiser_id: int, url: str):
                 """,
                 {"advertiser_id": advertiser_id},
             )
-            return
+            return None
 
         # 3) Gemini 분석
         logger.info(f"🔍 [{advertiser_id}] Gemini AI 분석 시작...")
@@ -720,11 +792,9 @@ async def run_analysis_task(advertiser_id: int, url: str):
                 """,
                 {"advertiser_id": advertiser_id},
             )
-            return
+            return None
 
-        # 4) 결과 저장 (키워드 + 임베딩 + 카테고리)
-        await save_analysis_results(advertiser_id, analysis_results)
-        logger.info(f"✨ [{advertiser_id}] 전체 분석 프로세스 완료")
+        return analysis_results
 
     except Exception as e:
         logger.error(f"💥 [{advertiser_id}] 분석 중 예외 발생: {e}", exc_info=True)
@@ -753,6 +823,7 @@ async def run_analysis_task(advertiser_id: int, url: str):
             logger.error(
                 f"💥 [{advertiser_id}] 에러 처리 중 추가 예외: {inner_e}", exc_info=True
             )
+        return None
 
 
 # --- API 엔드포인트 ---
@@ -777,6 +848,25 @@ async def start_analysis(request: AnalysisRequest, background_tasks: BackgroundT
         "message": "Analysis started in the background.",
         "advertiser_id": request.advertiser_id,
         "url": request.url,
+    }
+
+
+@app.get("/queue-status")
+def get_queue_status():
+    """
+    대기열 상태 조회 API.
+    프론트엔드에서 대기 중인 요청 수와 예상 대기 시간을 확인할 수 있습니다.
+    """
+    # semaphore._value: 현재 사용 가능한 슬롯 수 (0~2)
+    # semaphore._waiters: 대기 중인 Future 수
+    available_slots = getattr(browser_semaphore, "_value", 2)
+    waiting_requests = len(getattr(browser_semaphore, "_waiters", []))
+    estimated_wait_time = waiting_requests * 15  # 대기 요청당 15초 예상
+
+    return {
+        "available_slots": max(0, available_slots),
+        "waiting_requests": waiting_requests,
+        "estimated_wait_time": estimated_wait_time,
     }
 
 

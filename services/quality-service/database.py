@@ -21,8 +21,13 @@ DATABASE_URL = os.getenv(
     "postgresql://admin:your_secure_password_123@postgres:5432/search_exchange_db",
 )
 
-# SQLAlchemy 설정
-engine = create_engine(DATABASE_URL)
+# SQLAlchemy 설정 (pool: 8서비스×5=40, 비상+10, 30분 recycle)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=1800,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Databases (비동기 설정)
