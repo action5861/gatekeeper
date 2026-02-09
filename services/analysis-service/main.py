@@ -13,7 +13,6 @@ from database import database, connect_to_database, disconnect_from_database
 from cache import connect_redis, disconnect_redis
 from ai_analyzer import (
     analyze_query_with_ai,
-    generate_improved_queries,
     AiAnalysisReport,
 )
 from legacy_analyzer import (
@@ -82,15 +81,22 @@ class EvaluateResponse(BaseModel):
 def blend_reports(
     legacy_report: LegacyQualityReport, ai_report: Optional[AiAnalysisReport]
 ) -> FinalQualityReport:
+    """Gemini 분석만으로 점수 산출. AI 없을 때만 Legacy 폴백."""
     if not ai_report:
-        return FinalQualityReport(**legacy_report.dict())
-
-    final_score = int(
-        (
-            ai_report.commercial_intent * 100 * 0.5
-            + ai_report.specificity_level * 100 * 0.3
+        return FinalQualityReport(
+            score=legacy_report.score,
+            suggestions=legacy_report.suggestions,
+            keywords=legacy_report.keywords,
+            commercialValue=legacy_report.commercialValue,
+            ai_analysis=None,
+            needsImprovement=False,
+            aiSuggestions=None,
         )
-        + (legacy_report.score * 0.2)
+
+    # 완전히 Gemini 분석만 사용 (레거시 점수 미반영)
+    final_score = int(
+        ai_report.commercial_intent * 100 * 0.5
+        + ai_report.specificity_level * 100 * 0.5
     )
     final_score = max(10, min(100, final_score))
     if final_score >= 75:
@@ -114,12 +120,17 @@ def blend_reports(
         )
     else:
         suggestions.append("훌륭한 검색어입니다! 잠재적 가치가 높게 평가되었습니다.")
+
+    # 30점 미만: 개선 제안 없이 '다른 검색어 입력' 요청만 (aiSuggestions 없음)
+    needs_improvement = final_score < 30
     return FinalQualityReport(
         score=final_score,
         suggestions=suggestions,
         keywords=list(set(legacy_report.keywords + ai_report.predicted_keywords)),
         commercialValue=commercial_value,
         ai_analysis=ai_report,
+        needsImprovement=needs_improvement,
+        aiSuggestions=None,
     )
 
 
@@ -146,36 +157,9 @@ async def evaluate_query(request: EvaluateRequest):
         ai_report = None
 
     final_report = blend_reports(legacy_report, ai_report)
+    if final_report.score < 30:
+        print(f"⚠️ 저품질 검색어 ({final_report.score}점) - 다른 검색어 입력 요청")
 
-    # ⭐ 30점 미만 또는 low 값이면 AI 개선 제안 생성
-    if final_report.score < 30 or final_report.commercialValue == "low":
-        print(
-            f"🔄 저품질 검색어 감지 ({final_report.score}점) - AI 개선 제안 생성 중..."
-        )
-        try:
-            improved_suggestions = await asyncio.wait_for(
-                generate_improved_queries(query_text), timeout=10.0
-            )
-
-            if improved_suggestions:
-                # 각 제안 검색어도 빠르게 평가 (Legacy만 사용)
-                evaluated_suggestions = []
-                for sugg in improved_suggestions:
-                    quick_eval = evaluate_data_value_legacy(sugg["query"])
-                    evaluated_suggestions.append(
-                        ImprovedQuery(
-                            query=sugg["query"],
-                            reason=sugg.get("reason", "개선됨"),
-                            score=quick_eval.score,
-                            commercialValue=quick_eval.commercialValue,
-                        )
-                    )
-
-                final_report.needsImprovement = True
-                final_report.aiSuggestions = evaluated_suggestions
-                print(f"✨ AI 개선 제안 생성 완료: {len(evaluated_suggestions)}개")
-        except Exception as e:
-            print(f"⚠️ 개선 제안 생성 실패: {e}")
     db_query = """
         INSERT INTO search_queries (user_id, query_text, quality_score, commercial_value, keywords, suggestions, ai_analysis_data)
         VALUES (:user_id, :query_text, :quality_score, :commercial_value, :keywords, :suggestions, :ai_analysis_data)
@@ -224,10 +208,10 @@ async def evaluate_query_quick(request: QuickEvaluateRequest):
     - 점진적 UI를 위한 1단계 평가
     """
     query_text = request.query.strip()
-    
+
     # Legacy 분석만 실행 (매우 빠름: ~0.1초)
     legacy_report = evaluate_data_value_legacy(query_text)
-    
+
     # Legacy 결과를 FinalQualityReport 형식으로 변환
     quick_report = FinalQualityReport(
         score=legacy_report.score,
@@ -238,9 +222,9 @@ async def evaluate_query_quick(request: QuickEvaluateRequest):
         needsImprovement=False,
         aiSuggestions=None,
     )
-    
+
     print(f"⚡ 빠른 평가 완료: {query_text[:30]}... → {quick_report.score}점")
-    
+
     return QuickEvaluateResponse(
         success=True,
         data=quick_report,

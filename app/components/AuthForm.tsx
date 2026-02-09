@@ -285,7 +285,7 @@ export default function AuthForm({ mode, onSubmit, isLoading = false }: AuthForm
                     <p className="text-slate-400">
                         {mode === 'login'
                             ? 'Sign in to your account to continue'
-                            : 'Join DigiSafe to get started'
+                            : 'Join Intendex to get started'
                         }
                     </p>
                 </div>

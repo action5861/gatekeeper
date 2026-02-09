@@ -555,7 +555,7 @@ async def save_analysis_results(advertiser_id: int, results: dict):
     # --- 카테고리 저장 (AI가 추천한 카테고리를 business_categories ID로 변환하여 저장) ---
     primary_category_name = results.get("primary_category", "")
     recommended_categories = results.get("recommended_categories", [])
-    
+
     # primary_category를 첫 번째로 추가 (중복 제거)
     all_category_names = []
     if primary_category_name:
@@ -563,14 +563,14 @@ async def save_analysis_results(advertiser_id: int, results: dict):
     for cat_name in recommended_categories:
         if cat_name and cat_name not in all_category_names:
             all_category_names.append(cat_name)
-    
+
     category_count = 0
     primary_category_id = None
-    
+
     for idx, category_name in enumerate(all_category_names):
         if not category_name or not isinstance(category_name, str):
             continue
-        
+
         # business_categories 테이블에서 이름으로 검색 (정확히 일치하는 것 우선, 부분 일치도 시도)
         category_info = await database.fetch_one(
             """
@@ -592,14 +592,14 @@ async def save_analysis_results(advertiser_id: int, results: dict):
                 "name_pattern": f"%{category_name.strip()}%",
             },
         )
-        
+
         if category_info:
             category_id = category_info["id"]
-            is_primary = (idx == 0)  # 첫 번째 카테고리를 primary로 설정
-            
+            is_primary = idx == 0  # 첫 번째 카테고리를 primary로 설정
+
             if is_primary:
                 primary_category_id = category_id
-            
+
             try:
                 # advertiser_categories에 저장 (중복 체크)
                 existing = await database.fetch_one(
@@ -613,7 +613,7 @@ async def save_analysis_results(advertiser_id: int, results: dict):
                         "path": category_info["path"],
                     },
                 )
-                
+
                 if not existing:
                     await database.execute(
                         """
@@ -647,7 +647,7 @@ async def save_analysis_results(advertiser_id: int, results: dict):
                 f"⚠️ [{advertiser_id}] 카테고리를 찾을 수 없음: '{category_name}' "
                 f"(business_categories 테이블에 존재하지 않음)"
             )
-    
+
     logger.info(
         f"💾 [{advertiser_id}] 저장된 카테고리: {category_count}개 "
         f"(primary_category: {primary_category_name})"
@@ -705,7 +705,9 @@ async def run_analysis_task(advertiser_id: int, url: str):
                 await save_analysis_results(advertiser_id, analysis_results)
                 logger.info(f"✨ [{advertiser_id}] 전체 분석 프로세스 완료")
         except asyncio.TimeoutError:
-            logger.error("⏰ Analysis timed out for %s (advertiser_id=%s)", url, advertiser_id)
+            logger.error(
+                "⏰ Analysis timed out for %s (advertiser_id=%s)", url, advertiser_id
+            )
             try:
                 await database.execute(
                     """
@@ -727,7 +729,9 @@ async def run_analysis_task(advertiser_id: int, url: str):
                 logger.error("💥 타임아웃 처리 중 예외: %s", inner_e, exc_info=True)
 
 
-async def _run_analysis_task_inner(advertiser_id: int, url: str) -> Optional[Dict[str, Any]]:
+async def _run_analysis_task_inner(
+    advertiser_id: int, url: str
+) -> Optional[Dict[str, Any]]:
     """
     실제 분석 로직 (Semaphore 획득 후 실행).
     스크래핑 + Gemini 분석만 수행하고 결과를 반환. DB 저장은 호출자가 수행.

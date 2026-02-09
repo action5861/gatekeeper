@@ -1,6 +1,6 @@
 // 전역 레이아웃
 
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
 import ReturnTracker from './components/ReturnTracker'
 import './globals.css'
 import { Providers } from './providers'
@@ -8,6 +8,13 @@ import { Providers } from './providers'
 export const metadata: Metadata = {
   title: 'Intendex – Real-time Intent Exchange',
   description: 'A platform for real-time search data trading and auction',
+}
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
 }
 
 export default function RootLayout({

@@ -1979,10 +1979,13 @@ async def get_user_settlements_list(
         # 검색 조건
         search_condition = ""
         values: dict = {"page_size": page_size, "offset": offset}
+        count_values: dict = {}
 
         if search:
             search_condition = "WHERE u.username ILIKE :search OR u.email ILIKE :search"
-            values["search"] = f"%{search}%"
+            search_param = f"%{search}%"
+            values["search"] = search_param
+            count_values["search"] = search_param
 
         # 총 건수 조회
         count_query = f"""
@@ -1990,7 +1993,7 @@ async def get_user_settlements_list(
             FROM users u
             {search_condition}
         """
-        count_row = await database.fetch_one(count_query, values=values)
+        count_row = await database.fetch_one(count_query, values=count_values)
         total = count_row["total"] if count_row else 0
 
         # 사용자 목록 조회 (정산 건수 포함)
@@ -2060,14 +2063,17 @@ async def get_settlement_transactions(
         # 필터 조건 구성
         conditions = []
         values: dict = {"page_size": page_size, "offset": offset}
+        count_values: dict = {}
 
         if user_id:
             conditions.append("b.user_id = :user_id")
             values["user_id"] = user_id
+            count_values["user_id"] = user_id
 
         if type_filter:
             conditions.append("b.type = :type_filter")
             values["type_filter"] = type_filter
+            count_values["type_filter"] = type_filter
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
@@ -2077,7 +2083,7 @@ async def get_settlement_transactions(
             FROM bids b
             {where_clause}
         """
-        count_row = await database.fetch_one(count_query, values=values)
+        count_row = await database.fetch_one(count_query, values=count_values)
         total = count_row["total"] if count_row else 0
 
         # 정산 내역 조회
@@ -2146,10 +2152,12 @@ async def get_withdrawal_requests(
         # 필터 조건
         where_clause = ""
         values: dict = {"page_size": page_size, "offset": offset}
+        count_values: dict = {}
 
         if status_filter:
             where_clause = "WHERE w.status = :status_filter"
             values["status_filter"] = status_filter
+            count_values["status_filter"] = status_filter
 
         # 총 건수 조회
         count_query = f"""
@@ -2157,7 +2165,7 @@ async def get_withdrawal_requests(
             FROM withdrawal_requests w
             {where_clause}
         """
-        count_row = await database.fetch_one(count_query, values=values)
+        count_row = await database.fetch_one(count_query, values=count_values)
         total = count_row["total"] if count_row else 0
 
         # 출금 요청 목록 조회

@@ -71,7 +71,7 @@ export default function SearchInput({ onQueryChange, onSearchSubmit, isLoading =
       {/* Helper Text */}
       <div className="mt-4 text-center">
         <p className="text-sm text-slate-400">
-          팁: 가격, 브랜드, 리뷰 등 상업적 신호를 포함하면 품질 점수와 입찰가가 올라갑니다.
+          팁: 가격·브랜드·리뷰 등 상업적 신호를 포함할수록 품질 점수와 입찰가가 올라갑니다.
         </p>
       </div>
     </div>

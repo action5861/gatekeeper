@@ -201,25 +201,26 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
                 : 'border-slate-600 hover:border-slate-500'
                 }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center space-x-3 mb-2">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${index === 0
+              {/* Mobile-first: flex-col + gap-y-2; from sm: flex-row + justify-between */}
+              <div className="flex flex-col items-start gap-y-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex-1 w-full min-w-0">
+                  <div className="flex items-center space-x-3 mb-2 sm:mb-0">
+                    <div className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center text-sm font-bold ${index === 0
                       ? 'bg-yellow-500 text-yellow-900'
                       : 'bg-slate-600 text-slate-300'
                       }`}>
                       #{index + 1}
                     </div>
-                    <div>
-                      <div className="font-semibold text-slate-100">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-100 truncate">
                         {isMatchingFailed && bid.buyerName === 'Intendex' ? 'Intendex 보상' : bid.buyerName}
                       </div>
-                      <div className="text-sm text-slate-400">{bid.bonus}</div>
+                      <div className="text-sm text-slate-400 truncate">{bid.bonus}</div>
                     </div>
                   </div>
                 </div>
 
-                <div className="text-right mr-6">
+                <div className="w-full sm:w-auto text-left sm:text-right sm:mr-6">
                   <div className="text-2xl font-bold text-slate-100">
                     {bid.price.toLocaleString()} P
                   </div>
@@ -230,10 +231,10 @@ export default function AuctionStatus({ auction, onBidSelect }: AuctionStatusPro
 
                 <button
                   onClick={() => handleBidClick(bid)}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200 flex items-center space-x-2 whitespace-nowrap"
+                  className="w-full sm:w-auto px-6 py-3 sm:py-2 min-h-[44px] bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200 flex items-center justify-center space-x-2 whitespace-nowrap"
                 >
                   <span>Visit & Get {bid.price.toLocaleString()} P</span>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                   </svg>
                 </button>

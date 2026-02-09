@@ -7,6 +7,7 @@ import AuctionStatus from '@/components/main/AuctionStatus'
 import HeroSection from '@/components/main/HeroSection'
 import QualityAdvisor from '@/components/main/QualityAdvisor'
 import SearchInput from '@/components/main/SearchInput'
+import ValueCards from '@/components/main/ValueCards'
 import { authenticatedFetch, handleTokenExpiry } from '@/lib/auth'
 import { useDebounce } from '@/lib/hooks/useDebounce'
 import { useSlaTracker } from '@/lib/hooks/useSlaTracker'
@@ -75,10 +76,9 @@ export default function Home() {
         const quickData = await quickResponse.json()
 
         if (quickData.success) {
-          // 빠른 결과 즉시 표시
-          setQualityReport(quickData.data.qualityReport)
+          // 빠른 결과는 노출하지 않음 → Gemini 결과만 표시 (점수 변경 혼동 방지)
           setEvaluationStage('ai')
-          console.log(`⚡ [STEP 1-1] 빠른 평가 완료: ${quickData.data.qualityReport.score}점`)
+          console.log(`⚡ [STEP 1-1] 빠른 평가 완료 (화면에는 미표시)`)
         }
       } catch (error) {
         console.error('Quick evaluation error:', error)
@@ -314,14 +314,14 @@ export default function Home() {
   });
 
   return (
-    <div className="min-h-screen bg-slate-900">
+    <div className="min-h-screen bg-gradient-to-b from-[#0a1628] via-[#0f172a] to-[#1a2332]">
       {/* Header */}
       <Header />
 
       {/* Notification */}
       {notification && (
         <div className={`fixed top-20 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg transition-all duration-300 ${notification.type === 'success'
-          ? 'bg-green-600 text-white'
+          ? 'bg-white text-slate-900'
           : 'bg-red-600 text-white'
           }`}>
           {notification.message}
@@ -332,12 +332,12 @@ export default function Home() {
       <HeroSection />
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-4 pb-8">
 
         {/* Main Components Area */}
         <div className="space-y-6 animate-fadeInUp animation-delay-200">
           {/* Search Input Component - Premium Glassmorphism */}
-          <section className="mt-4 sm:mt-6">
+          <section className="mt-0">
             <SearchInput
               onQueryChange={handleQueryChange}
               onSearchSubmit={handleSearchSubmit}
@@ -345,10 +345,13 @@ export default function Home() {
             />
           </section>
 
+          {/* 가치 제안 카드 3개 */}
+          <ValueCards />
+
           {/* Quality Advisor Component - 검색어 입력 시 표시 (점진적 평가) */}
           {(query.trim() || qualityReport) && (
-            <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
-              {/* 빠른 평가 결과가 있으면 즉시 표시 */}
+            <section className="rounded-xl p-6 border border-white/10 bg-white/5 backdrop-blur-sm animate-fadeInUp">
+              {/* Gemini 평가 완료 후에만 점수·결과 표시 */}
               {qualityReport && (
                 <QualityAdvisor
                   qualityReport={qualityReport}
@@ -356,29 +359,28 @@ export default function Home() {
                 />
               )}
 
-              {/* 평가 단계별 상태 표시 */}
+              {/* 평가 중일 때만 로딩 표시 (Gemini 결과 전까지 점수 미노출) */}
               {evaluationStage === 'quick' && !qualityReport && (
                 <div className="text-center py-8">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-yellow-500 mx-auto mb-3"></div>
-                  <p className="text-lg font-semibold text-yellow-400 mb-1">⚡ 빠른 분석 중...</p>
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-t-2 border-white/60 mx-auto mb-3"></div>
+                  <p className="text-lg font-semibold text-white/90 mb-1">검색어 분석 준비 중...</p>
                   <p className="text-sm text-slate-400">잠시만 기다려주세요</p>
                 </div>
               )}
 
-              {evaluationStage === 'ai' && (
-                <div className="mt-4 p-4 bg-blue-900/20 border border-blue-500/30 rounded-lg">
-                  <div className="flex items-center space-x-3">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-t-2 border-blue-500"></div>
+              {evaluationStage === 'ai' && !qualityReport && (
+                <div className="py-8 p-4 border border-white/10 bg-white/5 rounded-lg">
+                  <div className="flex items-center justify-center space-x-3">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-t-2 border-white/60"></div>
                     <div>
-                      <p className="text-sm font-medium text-blue-400">🤖 AI 정밀 분석 진행 중...</p>
-                      <p className="text-xs text-slate-400">상업적 의도, 구체성, 구매 단계를 평가합니다</p>
+                      <p className="text-sm font-medium text-white/90">🤖 Gemini 검색어 평가 중...</p>
+                      <p className="text-xs text-slate-400">상업적 의도·구체성을 분석한 뒤 점수를 표시합니다</p>
                     </div>
                   </div>
-                  <div className="mt-3 flex items-center space-x-2">
-                    <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse animation-delay-200"></div>
-                    <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse animation-delay-400"></div>
-                    <span className="text-xs text-slate-500 ml-2">점수가 변경될 수 있습니다</span>
+                  <div className="mt-3 flex justify-center space-x-2">
+                    <div className="w-2 h-2 bg-white/60 rounded-full animate-pulse"></div>
+                    <div className="w-2 h-2 bg-white/40 rounded-full animate-pulse animation-delay-200"></div>
+                    <div className="w-2 h-2 bg-white/20 rounded-full animate-pulse animation-delay-400"></div>
                   </div>
                 </div>
               )}
@@ -388,7 +390,7 @@ export default function Home() {
           {/* Auction Status Component - 경매 시작 후 표시 (SLA 추적용 ref 연결) */}
           <div ref={auctionRef}>
             {auction && (
-              <section className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 animate-fadeInUp">
+              <section className="rounded-xl p-6 border border-white/10 bg-white/5 backdrop-blur-sm animate-fadeInUp">
                 <AuctionStatus
                   auction={auction}
                   onBidSelect={handleBidSelect}
@@ -399,9 +401,9 @@ export default function Home() {
 
           {/* Selected Bid Confirmation - 입찰 선택 후 표시 */}
           {selectedBid && auction && (
-            <section className="bg-green-800/20 rounded-xl p-6 border border-green-600/30 animate-fadeInUp">
+            <section className="rounded-xl p-6 border border-white/20 bg-white/10 backdrop-blur-sm animate-fadeInUp">
               <div className="text-center">
-                <h3 className="text-xl font-semibold text-green-400 mb-2">
+                <h3 className="text-xl font-semibold text-white mb-2">
                   🎉 입찰이 성공적으로 선택되었습니다!
                 </h3>
                 <p className="text-slate-300">
@@ -413,7 +415,7 @@ export default function Home() {
         </div>
 
         {/* Footer */}
-        <footer className="mt-16 text-center text-slate-400 animate-fadeIn animation-delay-400">
+        <footer className="mt-16 text-center text-slate-500 animate-fadeIn animation-delay-400">
           <p className="text-sm mb-2">
             © 2025 Intendex. All rights reserved.
           </p>

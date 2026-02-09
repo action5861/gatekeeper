@@ -2,59 +2,14 @@
 
 'use client'
 
+import Header from '@/components/Header'
 import { ArrowRight, Library, Lock, ShieldCheck } from 'lucide-react'
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
 
 export default function HowItWorks() {
-    const [userType, setUserType] = useState<'user' | 'advertiser' | null>(null)
-
-    useEffect(() => {
-        if (typeof window !== 'undefined') {
-            const storedUserType = localStorage.getItem('userType')
-            if (storedUserType === 'user' || storedUserType === 'advertiser') {
-                setUserType(storedUserType)
-            }
-        }
-    }, [])
-
     return (
         <div className="min-h-screen bg-slate-900">
-            {/* Header */}
-            <div className="bg-slate-800/50 backdrop-blur-sm border-b border-slate-700">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-                    <div className="flex items-center justify-between h-16">
-                        <div className="flex items-center space-x-3">
-                            <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-green-500 rounded-lg flex items-center justify-center">
-                                <ArrowRight className="w-5 h-5 text-white" />
-                            </div>
-                            <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-green-400 bg-clip-text text-transparent">
-                                Intendex
-                            </h1>
-                        </div>
-                        <nav className="flex items-center space-x-1">
-                            <Link
-                                href="/"
-                                className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 text-slate-300 hover:text-white hover:bg-slate-700"
-                            >
-                                <span className="font-medium">Exchange</span>
-                            </Link>
-                            <Link
-                                href="/dashboard"
-                                className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 text-slate-300 hover:text-white hover:bg-slate-700"
-                            >
-                                <span className="font-medium">Dashboard</span>
-                            </Link>
-                            <Link
-                                href="/how-it-works"
-                                className="flex items-center space-x-2 px-4 py-2 rounded-lg transition-all duration-200 bg-blue-600 text-white shadow-lg"
-                            >
-                                <span className="font-medium">How It Works</span>
-                            </Link>
-                        </nav>
-                    </div>
-                </div>
-            </div>
+            <Header />
 
             {/* Improved Hero Section */}
             <section className="relative pt-20 pb-8 text-center overflow-hidden">

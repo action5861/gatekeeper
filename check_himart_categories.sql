@@ -54,3 +54,5 @@ WHERE company_name ILIKE '%하이마트%'
 
 
 
+
+

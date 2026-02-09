@@ -4,7 +4,7 @@
 
 import { getQualityGrade } from '@/lib/simulation'
 import { QualityReport } from '@/lib/types'
-import { AlertCircle, ArrowRight, CheckCircle, Lightbulb, Sparkles, TrendingUp } from 'lucide-react'
+import { AlertCircle, CheckCircle, TrendingUp } from 'lucide-react'
 import { Cell, Pie, PieChart, ResponsiveContainer } from 'recharts'
 
 interface QualityAdvisorProps {
@@ -141,83 +141,17 @@ export default function QualityAdvisor({ qualityReport, onQueryReplace }: Qualit
         </div>
       </div>
 
-      {/* ⭐ AI 개선 제안 (30점 미만 또는 low 값인 경우) */}
-      {qualityReport.needsImprovement && qualityReport.aiSuggestions && qualityReport.aiSuggestions.length > 0 && (
+      {/* 30점 미만: 다른 검색어 입력 요청 (AI 개선 제안 없음) */}
+      {qualityReport.needsImprovement && (
         <div className="mt-6 p-6 bg-gradient-to-r from-amber-900/20 to-orange-900/20 rounded-xl border border-amber-600/30 animate-fadeInUp">
-          <div className="flex items-center space-x-2 mb-4">
-            <Lightbulb className="w-6 h-6 text-amber-400" />
+          <div className="flex items-center space-x-2 mb-3">
+            <AlertCircle className="w-6 h-6 text-amber-400" />
             <h4 className="text-xl font-semibold text-amber-400">
-              AI가 더 나은 검색어를 추천합니다
+              검색어 점수가 30점 미만입니다
             </h4>
           </div>
-
-          <p className="text-slate-300 mb-4 text-sm">
-            ⚠️ 현재 검색어는 광고주 관심도가 낮아 보상이 적을 수 있습니다.
-            아래 검색어를 클릭하면 자동으로 교체됩니다.
-          </p>
-
-          <div className="space-y-3">
-            {qualityReport.aiSuggestions.map((suggestion, index) => {
-              const scoreImprovement = suggestion.score ? suggestion.score - qualityReport.score : 0;
-              const isRecommended = suggestion.score && suggestion.score >= 75;
-
-              return (
-                <button
-                  key={index}
-                  onClick={() => onQueryReplace && onQueryReplace(suggestion.query)}
-                  className={`w-full text-left p-4 rounded-lg border-2 transition-all duration-200 hover:scale-102 hover:shadow-lg ${isRecommended
-                      ? 'bg-gradient-to-r from-green-900/30 to-emerald-900/30 border-green-500/50 hover:border-green-400'
-                      : 'bg-slate-800/50 border-slate-600 hover:border-blue-500'
-                    }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-2 mb-2">
-                        {isRecommended && (
-                          <Sparkles className="w-4 h-4 text-green-400" />
-                        )}
-                        <span className={`font-semibold ${isRecommended ? 'text-green-400' : 'text-blue-400'}`}>
-                          {suggestion.query}
-                        </span>
-                        {isRecommended && (
-                          <span className="px-2 py-0.5 bg-green-500/20 text-green-400 text-xs rounded-full">
-                            추천
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center space-x-4 text-sm">
-                        {suggestion.score && (
-                          <span className="text-slate-300">
-                            점수: <span className="font-semibold text-white">{suggestion.score}</span>/100
-                            {scoreImprovement > 0 && (
-                              <span className="text-green-400 ml-1">
-                                (+{scoreImprovement}점 ⬆️)
-                              </span>
-                            )}
-                          </span>
-                        )}
-                        {suggestion.commercialValue && (
-                          <span className={`${getCommercialValueColor(suggestion.commercialValue)}`}>
-                            {suggestion.commercialValue.toUpperCase()}
-                          </span>
-                        )}
-                      </div>
-
-                      <p className="text-slate-400 text-xs mt-1">
-                        💡 {suggestion.reason}
-                      </p>
-                    </div>
-
-                    <ArrowRight className="w-5 h-5 text-slate-400 mt-1 ml-2 flex-shrink-0" />
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          <p className="text-xs text-slate-500 mt-4 text-center">
-            💡 팁: 개선된 검색어를 사용하면 더 많은 광고주가 입찰하여 더 높은 보상을 받을 수 있습니다!
+          <p className="text-slate-300 text-sm">
+            이 검색어는 상업적 가치가 낮아 평가할 수 없습니다. 다른 검색어를 입력해 주세요.
           </p>
         </div>
       )}
